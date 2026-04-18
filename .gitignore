@@ -28,6 +28,8 @@ GUI/sudoku_history.json
 
 # Local or sensitive configuration
 .editorconfig
+AGENTS.md
+CLAUDE.md
 
 # Other local workspace projects/files outside the sudoku assistant
 autotest_fas_api/

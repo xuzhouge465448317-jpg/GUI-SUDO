@@ -1,0 +1,30 @@
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Virtual environments
+venv/
+.venv/
+
+# Build output
+build/
+dist/
+*.egg-info/
+
+# Logs and runtime state
+*.log
+logs/
+GUI/logs/
+GUI/sudoku_gui_state.json
+GUI/sudoku_history.json
+
+# Local IDE/tooling state
+.idea/
+~/
+
+# Archives and generated packages
+*.zip
+
+# Local or sensitive configuration
+.editorconfig

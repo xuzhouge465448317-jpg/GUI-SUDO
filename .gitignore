@@ -28,3 +28,19 @@ GUI/sudoku_history.json
 
 # Local or sensitive configuration
 .editorconfig
+
+# Other local workspace projects/files outside the sudoku assistant
+autotest_fas_api/
+data_batch_bug/
+edgedriver_win64/
+fas_web_ui/
+financial_automation/
+mypytest/
+my_pytest/
+noc_api_auto-master/
+other/
+temp/
+tmp_ocr_eval/
+travelwebsite/
+work/
+test1.jmx

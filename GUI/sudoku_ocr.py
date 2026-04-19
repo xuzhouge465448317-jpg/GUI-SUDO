@@ -111,7 +111,104 @@ class SudokuOCR:
         rect[3] = points[np.argmax(diffs)]
         return rect
 
+    def _projection_groups(self, projection, threshold):
+        indices = np.where(projection >= threshold)[0]
+        if len(indices) == 0:
+            return []
+
+        groups = []
+        start = previous = int(indices[0])
+        for index in indices[1:]:
+            index = int(index)
+            if index <= previous + 2:
+                previous = index
+                continue
+            groups.append((start + previous) // 2)
+            start = previous = index
+        groups.append((start + previous) // 2)
+        return groups
+
+    def _grid_line_counts(self, horizontal, vertical, bounds):
+        x, y, width, height = bounds
+        horizontal_roi = horizontal[y:y + height, x:x + width]
+        vertical_roi = vertical[y:y + height, x:x + width]
+        if horizontal_roi.size == 0 or vertical_roi.size == 0:
+            return 0, 0
+
+        vertical_projection = np.count_nonzero(vertical_roi, axis=0)
+        horizontal_projection = np.count_nonzero(horizontal_roi, axis=1)
+        vertical_threshold = max(8, int(height * 0.35))
+        horizontal_threshold = max(8, int(width * 0.35))
+        vertical_groups = self._projection_groups(vertical_projection, vertical_threshold)
+        horizontal_groups = self._projection_groups(horizontal_projection, horizontal_threshold)
+        return len(vertical_groups), len(horizontal_groups)
+
+    def _find_grid_corners_from_lines(self, gray):
+        blur = cv2.GaussianBlur(gray, (3, 3), 0)
+        binary = cv2.adaptiveThreshold(
+            blur,
+            255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY_INV,
+            15,
+            3,
+        )
+        edges = cv2.Canny(blur, 50, 150)
+        binary = cv2.bitwise_or(binary, edges)
+
+        kernel_length = max(15, min(gray.shape[:2]) // 24)
+        horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_length, 1))
+        vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, kernel_length))
+        horizontal = cv2.morphologyEx(binary, cv2.MORPH_OPEN, horizontal_kernel)
+        vertical = cv2.morphologyEx(binary, cv2.MORPH_OPEN, vertical_kernel)
+        lines = cv2.bitwise_or(horizontal, vertical)
+        lines = cv2.dilate(lines, np.ones((3, 3), np.uint8), iterations=1)
+
+        contours, _ = cv2.findContours(lines, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        image_area = gray.shape[0] * gray.shape[1]
+        min_side = min(gray.shape[:2])
+        best_corners = None
+        best_score = -1.0
+
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area < image_area * 0.015:
+                continue
+
+            x, y, width, height = cv2.boundingRect(contour)
+            if min(width, height) < min_side * 0.20:
+                continue
+
+            ratio = width / max(height, 1)
+            if not 0.65 <= ratio <= 1.45:
+                continue
+
+            vertical_count, horizontal_count = self._grid_line_counts(
+                horizontal,
+                vertical,
+                (x, y, width, height),
+            )
+            if vertical_count < 8 or horizontal_count < 8:
+                continue
+
+            square_score = 1.0 - min(abs(1.0 - ratio), 1.0)
+            line_score = min(vertical_count, 10) + min(horizontal_count, 10)
+            score = line_score + square_score + area / image_area
+            if score <= best_score:
+                continue
+
+            rect = cv2.minAreaRect(contour)
+            box = cv2.boxPoints(rect)
+            best_corners = self._order_points(box.astype(np.float32))
+            best_score = score
+
+        return best_corners
+
     def _find_grid_corners(self, gray):
+        line_corners = self._find_grid_corners_from_lines(gray)
+        if line_corners is not None:
+            return line_corners
+
         blur = cv2.GaussianBlur(gray, (7, 7), 0)
         thresh = cv2.adaptiveThreshold(
             blur,
@@ -562,7 +659,36 @@ class SudokuOCR:
             return 6
         return 0
 
+    def _shape_looks_like_one(self, candidate):
+        if candidate is None or candidate.size == 0:
+            return False
+
+        ys, xs = np.where(candidate > 0)
+        if len(xs) == 0:
+            return False
+
+        left, right = int(xs.min()), int(xs.max())
+        top, bottom = int(ys.min()), int(ys.max())
+        width = right - left + 1
+        height = bottom - top + 1
+        if height < candidate.shape[0] * 0.45:
+            return False
+
+        ratio = width / max(height, 1)
+        if ratio > 0.68:
+            return False
+
+        digit_roi = candidate[top:bottom + 1, left:right + 1]
+        if digit_roi.size == 0:
+            return False
+
+        vertical_projection = np.count_nonzero(digit_roi, axis=0) / max(height, 1)
+        strong_columns = np.count_nonzero(vertical_projection >= 0.80)
+        return strong_columns >= max(2, int(width * 0.18))
+
     def _finalize_digit_result(self, digit, variant, confidence):
+        if digit in {4, 7} and variant is not None and self._shape_looks_like_one(variant):
+            digit = 1
         if digit in {6, 9} and variant is not None:
             shape_hint = self._shape_hint_six_nine(variant)
             if shape_hint in {6, 9}:
@@ -570,7 +696,7 @@ class SudokuOCR:
         return digit, variant, confidence
 
     def _recognize_cell_slow(self, gray_sources):
-        variants, is_empty = self._build_cell_variants(gray_sources)
+        variants, is_empty = self._build_cell_variants(gray_sources, variant_limit=6)
         if is_empty or not variants:
             return 0, None, -1.0
 
@@ -589,7 +715,7 @@ class SudokuOCR:
 
         # Ambiguous cells expand to the remaining variants instead of letting the
         # first OCR result decide on its own.
-        for variant_index, variant in enumerate(variants[1:3], start=1):
+        for variant_index, variant in enumerate(variants[1:], start=1):
             variant_votes, variant_best_digit, variant_best_conf = self._collect_variant_votes(variant, variant_index)
             for digit, records in variant_votes.items():
                 votes[digit].extend(records)
@@ -602,7 +728,16 @@ class SudokuOCR:
 
         ranked = self._rank_votes(votes)
         top = ranked[0]
-        runner_up = ranked[1] if len(ranked) > 1 else None
+        for candidate in ranked[1:]:
+            if (
+                candidate["config_count"] > top["config_count"]
+                and candidate["vote_count"] >= top["vote_count"]
+                and candidate["average_conf"] >= top["average_conf"] + 10
+                and candidate["best_conf"] >= top["best_conf"]
+            ):
+                top = candidate
+                break
+        runner_up = next((item for item in ranked if item is not top), None)
 
         if top["variant_count"] >= 2 and top["average_conf"] >= 60:
             return self._finalize_digit_result(top["digit"], primary_variant, top["best_conf"])
@@ -696,42 +831,178 @@ class SudokuOCR:
 
         return conflicts
 
-    def recognize_digits(self, warped_img, return_confidence=False):
-        gray = cv2.cvtColor(warped_img, cv2.COLOR_BGR2GRAY)
-        cleaned = self._remove_grid_lines(gray)
-        board = [[0 for _ in range(BOARD_SIZE)] for _ in range(BOARD_SIZE)]
+    def _build_recognition_sources(self, gray, cleaned):
         variants_map = [[None for _ in range(BOARD_SIZE)] for _ in range(BOARD_SIZE)]
         confidence_map = [[-1.0 for _ in range(BOARD_SIZE)] for _ in range(BOARD_SIZE)]
         cell_sources_map = [[None for _ in range(BOARD_SIZE)] for _ in range(BOARD_SIZE)]
         signal_map = [[0.0 for _ in range(BOARD_SIZE)] for _ in range(BOARD_SIZE)]
+        occupied_cells = []
 
+        for row in range(BOARD_SIZE):
+            for col in range(BOARD_SIZE):
+                y1 = row * CELL_SIZE
+                y2 = (row + 1) * CELL_SIZE
+                x1 = col * CELL_SIZE
+                x2 = (col + 1) * CELL_SIZE
+                original_gray = gray[y1:y2, x1:x2]
+                cleaned_cell = cleaned[y1:y2, x1:x2]
+                blended_cell = cv2.addWeighted(original_gray, 0.35, cleaned_cell, 0.65, 0)
+                gray_sources = (blended_cell, cleaned_cell, original_gray)
+                cell_sources_map[row][col] = gray_sources
+                signal_map[row][col] = self._cell_signal_strength(gray_sources)
+
+                if not self._has_center_digit_stroke(gray_sources):
+                    continue
+                variants, is_empty = self._build_cell_variants(gray_sources, variant_limit=1)
+                if is_empty or not variants:
+                    continue
+                variants_map[row][col] = variants[0]
+                occupied_cells.append((row, col))
+
+        return variants_map, confidence_map, cell_sources_map, signal_map, occupied_cells
+
+    def _assign_layout_digit(self, board, confidence_map, templates, variants_map, row, col, digit, confidence):
+        if not (0 <= row < BOARD_SIZE and 0 <= col < BOARD_SIZE):
+            return False
+        variant = variants_map[row][col]
+        if variant is None:
+            return False
+        digit, _variant, _confidence = self._finalize_digit_result(int(digit), variant, confidence)
+        board[row][col] = digit
+        confidence_map[row][col] = max(float(confidence), 70.0)
+        templates[digit].append(variant)
+        return True
+
+    def _seed_digits_from_layout(self, cleaned, board, confidence_map, templates, variants_map, occupied_cells):
+        try:
+            data = pytesseract.image_to_data(
+                cleaned,
+                config=self.layout_config,
+                output_type=Output.DICT,
+            )
+        except Exception:
+            return 0
+
+        occupied_by_row = defaultdict(list)
+        for row, col in occupied_cells:
+            occupied_by_row[row].append(col)
+        for cols in occupied_by_row.values():
+            cols.sort()
+
+        seeded = 0
+        for text, conf, left, top, width, height in zip(
+            data["text"],
+            data["conf"],
+            data["left"],
+            data["top"],
+            data["width"],
+            data["height"],
+        ):
+            digits = "".join(ch for ch in str(text).strip() if ch in "123456789")
+            if not digits:
+                continue
+            try:
+                confidence = float(conf)
+            except (TypeError, ValueError):
+                confidence = -1.0
+
+            row = int((top + height / 2) // CELL_SIZE)
+            if not 0 <= row < BOARD_SIZE:
+                continue
+
+            if len(digits) == 1:
+                if confidence < 85:
+                    continue
+                col = int((left + width / 2) // CELL_SIZE)
+                if 0 <= col < BOARD_SIZE and board[row][col] == 0 and self._assign_layout_digit(
+                    board,
+                    confidence_map,
+                    templates,
+                    variants_map,
+                    row,
+                    col,
+                    digits,
+                    confidence,
+                ):
+                    seeded += 1
+                continue
+
+            candidate_cols = []
+            for col in occupied_by_row.get(row, []):
+                center_x = col * CELL_SIZE + CELL_SIZE / 2
+                if left - 8 <= center_x <= left + width + 8 and board[row][col] == 0:
+                    candidate_cols.append(col)
+            if len(candidate_cols) != len(digits):
+                continue
+            for col, digit in zip(candidate_cols, digits):
+                if self._assign_layout_digit(
+                    board,
+                    confidence_map,
+                    templates,
+                    variants_map,
+                    row,
+                    col,
+                    digit,
+                    confidence,
+                ):
+                    seeded += 1
+        return seeded
+
+    def _match_cells_from_templates(self, board, confidence_map, templates, variants_map, occupied_cells):
+        if not templates:
+            return 0
+        matched_count = 0
+        for row, col in occupied_cells:
+            if board[row][col] != 0:
+                continue
+            variant = variants_map[row][col]
+            if variant is None:
+                continue
+            matched = self._template_match_digit(variant, templates)
+            if not matched:
+                continue
+            board[row][col] = matched
+            confidence_map[row][col] = 82.0
+            templates[matched].append(variant)
+            matched_count += 1
+        return matched_count
+
+    def _recognize_unresolved_cells(self, cell_sources_map, cells):
         def recognize_one(row, col):
-            y1 = row * CELL_SIZE
-            y2 = (row + 1) * CELL_SIZE
-            x1 = col * CELL_SIZE
-            x2 = (col + 1) * CELL_SIZE
-            original_gray = gray[y1:y2, x1:x2]
-            cleaned_cell = cleaned[y1:y2, x1:x2]
-            blended_cell = cv2.addWeighted(original_gray, 0.35, cleaned_cell, 0.65, 0)
-            gray_sources = (blended_cell, cleaned_cell, original_gray)
-            signal_strength = self._cell_signal_strength(gray_sources)
-            digit, variant, confidence = self._recognize_cell(gray_sources)
-            return row, col, gray_sources, signal_strength, digit, variant, confidence
+            digit, variant, confidence = self._recognize_cell(cell_sources_map[row][col])
+            return row, col, digit, variant, confidence
 
-        cells = [(row, col) for row in range(BOARD_SIZE) for col in range(BOARD_SIZE)]
-        if self.ocr_workers <= 1:
-            results = [recognize_one(row, col) for row, col in cells]
-        else:
-            with ThreadPoolExecutor(max_workers=self.ocr_workers) as executor:
-                futures = [executor.submit(recognize_one, row, col) for row, col in cells]
-                results = [future.result() for future in as_completed(futures)]
+        if not cells:
+            return []
+        if self.ocr_workers <= 1 or len(cells) == 1:
+            return [recognize_one(row, col) for row, col in cells]
 
-        for row, col, gray_sources, signal_strength, digit, variant, confidence in results:
-            cell_sources_map[row][col] = gray_sources
-            signal_map[row][col] = signal_strength
+        with ThreadPoolExecutor(max_workers=self.ocr_workers) as executor:
+            futures = [executor.submit(recognize_one, row, col) for row, col in cells]
+            return [future.result() for future in as_completed(futures)]
+
+    def recognize_digits(self, warped_img, return_confidence=False):
+        gray = cv2.cvtColor(warped_img, cv2.COLOR_BGR2GRAY)
+        cleaned = self._remove_grid_lines(gray)
+        board = [[0 for _ in range(BOARD_SIZE)] for _ in range(BOARD_SIZE)]
+        variants_map, confidence_map, cell_sources_map, signal_map, occupied_cells = self._build_recognition_sources(
+            gray,
+            cleaned,
+        )
+
+        templates = defaultdict(list)
+        self._seed_digits_from_layout(cleaned, board, confidence_map, templates, variants_map, occupied_cells)
+        self._match_cells_from_templates(board, confidence_map, templates, variants_map, occupied_cells)
+
+        unresolved_cells = [(row, col) for row, col in occupied_cells if board[row][col] == 0]
+        for row, col, digit, variant, confidence in self._recognize_unresolved_cells(cell_sources_map, unresolved_cells):
+            if digit == 0:
+                continue
             board[row][col] = digit
             variants_map[row][col] = variant
             confidence_map[row][col] = confidence
+            if variant is not None:
+                templates[digit].append(variant)
 
         for row in range(BOARD_SIZE):
             for col in range(BOARD_SIZE):
@@ -746,20 +1017,6 @@ class SudokuOCR:
                 variants_map[row][col] = variant
                 confidence_map[row][col] = confidence
 
-        for row, col in self._find_conflicting_cells(board):
-            digit, variant, confidence = self._recognize_cell_slow(cell_sources_map[row][col])
-            board[row][col] = digit
-            variants_map[row][col] = variant
-            confidence_map[row][col] = confidence
-
-        templates = defaultdict(list)
-        for row in range(BOARD_SIZE):
-            for col in range(BOARD_SIZE):
-                digit = board[row][col]
-                variant = variants_map[row][col]
-                if digit != 0 and variant is not None and confidence_map[row][col] >= 42:
-                    templates[digit].append(variant)
-
         if templates:
             for row in range(BOARD_SIZE):
                 for col in range(BOARD_SIZE):
@@ -771,6 +1028,14 @@ class SudokuOCR:
                     matched = self._template_match_digit(variant, templates)
                     if matched:
                         board[row][col] = matched
+                        confidence_map[row][col] = 82.0
+
+        for row, col in self._find_conflicting_cells(board):
+            digit, variant, confidence = self._recognize_cell_slow(cell_sources_map[row][col])
+            board[row][col] = digit
+            variants_map[row][col] = variant
+            confidence_map[row][col] = confidence
+
         if return_confidence:
             return board, confidence_map
         return board

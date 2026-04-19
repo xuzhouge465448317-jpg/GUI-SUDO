@@ -33,6 +33,249 @@ DND_FILES = getattr(_tkinterdnd2, "DND_FILES", None)
 TkinterDnD = getattr(_tkinterdnd2, "TkinterDnD", None)
 
 
+TEACHING_STRATEGIES = [
+    "single_candidate",
+    "single_position",
+    "row_elimination",
+    "column_elimination",
+    "block_elimination",
+    "naked_pair",
+    "hidden_pair",
+    "x_wing",
+]
+
+TEACHING_STRATEGY_LABELS = {
+    "single_candidate": "唯一候选数",
+    "single_position": "唯一位置",
+    "row_elimination": "行排除",
+    "column_elimination": "列排除",
+    "block_elimination": "宫排除",
+    "naked_pair": "裸对",
+    "hidden_pair": "隐对",
+    "x_wing": "X-Wing",
+}
+
+
+def teaching_candidates_for_cell(board, row, col):
+    if board[row][col]:
+        return []
+    used = set(board[row])
+    used.update(board[r][col] for r in range(9))
+    box_row = (row // 3) * 3
+    box_col = (col // 3) * 3
+    for r in range(box_row, box_row + 3):
+        for c in range(box_col, box_col + 3):
+            used.add(board[r][c])
+    return [value for value in range(1, 10) if value not in used]
+
+
+def _teaching_cell(row, col):
+    return {"row": row + 1, "col": col + 1}
+
+
+def _teaching_box_index(row, col):
+    return (row // 3) * 3 + (col // 3) + 1
+
+
+def _teaching_peer_cells(row, col):
+    peers = {(row, index) for index in range(9)}
+    peers.update((index, col) for index in range(9))
+    box_row = (row // 3) * 3
+    box_col = (col // 3) * 3
+    peers.update((box_row + r, box_col + c) for r in range(3) for c in range(3))
+    peers.discard((row, col))
+    return peers
+
+
+def _teaching_digits_text(values):
+    values = sorted(value for value in set(values) if value)
+    return "、".join(str(value) for value in values) if values else "无"
+
+
+def _teaching_candidate_map(board):
+    candidates = {}
+    for row in range(9):
+        for col in range(9):
+            if board[row][col] == 0:
+                candidates[(row, col)] = teaching_candidates_for_cell(board, row, col)
+    return candidates
+
+
+def _teaching_unit_definitions():
+    units = []
+    units.extend(("row", row, f"第{row + 1}行", [(row, col) for col in range(9)]) for row in range(9))
+    units.extend(("column", col, f"第{col + 1}列", [(row, col) for row in range(9)]) for col in range(9))
+    for box_row in range(3):
+        for box_col in range(3):
+            box = box_row * 3 + box_col
+            cells = [
+                (row, col)
+                for row in range(box_row * 3, box_row * 3 + 3)
+                for col in range(box_col * 3, box_col * 3 + 3)
+            ]
+            units.append(("block", box, f"第{box + 1}宫", cells))
+    return units
+
+
+def _teaching_highlight(board, row, col, context_cells):
+    peers = sorted(_teaching_peer_cells(row, col))
+    eliminated = sorted(cell for cell in peers if board[cell[0]][cell[1]])
+    return {
+        "row": row + 1,
+        "col": col + 1,
+        "block": _teaching_box_index(row, col),
+        "context_cells": [_teaching_cell(r, c) for r, c in sorted(context_cells)],
+        "eliminated_cells": [_teaching_cell(r, c) for r, c in eliminated],
+    }
+
+
+def _make_teaching_step(board, row, col, value, strategy, explanation, context_cells, unit=None):
+    return {
+        "step": 0,
+        "total_steps": 0,
+        "position": _teaching_cell(row, col),
+        "value": value,
+        "strategy": strategy,
+        "strategy_label": TEACHING_STRATEGY_LABELS[strategy],
+        "explanation": explanation,
+        "highlight": _teaching_highlight(board, row, col, context_cells),
+        "candidates_before": list(range(1, 10)),
+        "candidates_after": [value],
+        "unit": unit,
+    }
+
+
+def _explain_single_candidate(board, row, col, value):
+    row_numbers = _teaching_digits_text(board[row])
+    col_numbers = _teaching_digits_text(board[r][col] for r in range(9))
+    box_row = (row // 3) * 3
+    box_col = (col // 3) * 3
+    block_numbers = _teaching_digits_text(
+        board[r][c]
+        for r in range(box_row, box_row + 3)
+        for c in range(box_col, box_col + 3)
+    )
+    return (
+        f"第{row + 1}行第{col + 1}列只能填 {value}。"
+        f"因为该行已有 {row_numbers}，该列已有 {col_numbers}，"
+        f"第{_teaching_box_index(row, col)}宫已有 {block_numbers}，排除后仅剩 {value}。"
+    )
+
+
+def _teaching_position_in_unit(unit_type, row, col):
+    if unit_type == "row":
+        return f"第{col + 1}列"
+    if unit_type == "column":
+        return f"第{row + 1}行"
+    return f"第{row + 1}行第{col + 1}列"
+
+
+def _teaching_exclusion_reason(board, row, col, value, unit_type):
+    if unit_type != "row" and value in board[row]:
+        return f"第{row + 1}行已有{value}"
+    if unit_type != "column" and any(board[r][col] == value for r in range(9)):
+        return f"第{col + 1}列已有{value}"
+    box_row = (row // 3) * 3
+    box_col = (col // 3) * 3
+    if unit_type != "block":
+        for r in range(box_row, box_row + 3):
+            for c in range(box_col, box_col + 3):
+                if board[r][c] == value:
+                    return f"第{_teaching_box_index(row, col)}宫已有{value}"
+    return f"候选数不包含{value}"
+
+
+def _explain_single_position(board, unit_type, unit_label, cells, row, col, value):
+    existing = {board[r][c] for r, c in cells if board[r][c]}
+    missing = _teaching_digits_text(value for value in range(1, 10) if value not in existing)
+    empty_cells = [(r, c) for r, c in cells if board[r][c] == 0]
+    excluded = []
+    for other_row, other_col in empty_cells:
+        if (other_row, other_col) == (row, col):
+            continue
+        candidates = teaching_candidates_for_cell(board, other_row, other_col)
+        if value in candidates:
+            continue
+        position = _teaching_position_in_unit(unit_type, other_row, other_col)
+        reason = _teaching_exclusion_reason(board, other_row, other_col, value, unit_type)
+        excluded.append(f"{position}不能填{value}（{reason}）")
+    excluded_text = "；".join(excluded) if excluded else "其它位置都被行、列或宫排除"
+    target_position = _teaching_position_in_unit(unit_type, row, col)
+    return (
+        f"{unit_label}缺少 {missing}。现在看数字 {value}：{excluded_text}。"
+        f"因此{unit_label}只剩{target_position}可以放{value}，"
+        f"所以第{row + 1}行第{col + 1}列填 {value}。"
+    )
+
+
+def find_next_teaching_step(board):
+    candidates = _teaching_candidate_map(board)
+    for (row, col), values in candidates.items():
+        if len(values) == 1:
+            value = values[0]
+            return _make_teaching_step(
+                board,
+                row,
+                col,
+                value,
+                "single_candidate",
+                _explain_single_candidate(board, row, col, value),
+                _teaching_peer_cells(row, col),
+            )
+
+    for unit_type, unit_index, label, cells in _teaching_unit_definitions():
+        for value in range(1, 10):
+            places = [cell for cell in cells if value in candidates.get(cell, [])]
+            if len(places) == 1:
+                row, col = places[0]
+                return _make_teaching_step(
+                    board,
+                    row,
+                    col,
+                    value,
+                    "single_position",
+                    _explain_single_position(board, unit_type, label, cells, row, col, value),
+                    set(cells),
+                    {"type": unit_type, "index": unit_index + 1, "label": label},
+                )
+    return None
+
+
+def build_teaching_plan(board, max_steps=81):
+    working = [row[:] for row in board]
+    steps = []
+    message = "已生成完整教学步骤。"
+
+    for _ in range(max_steps):
+        if all(value for row in working for value in row):
+            break
+        step = find_next_teaching_step(working)
+        if step is None:
+            result = SudokuSolver(working).solve_with_uniqueness_check(max_solutions=2)
+            if result["solved"]:
+                message = "当前题目需要高级推理或试探法，已保留可解释的教学步骤。"
+            else:
+                message = "当前盘面无解或存在识别错误，请检查冲突位置后重试。"
+            break
+        row = step["position"]["row"] - 1
+        col = step["position"]["col"] - 1
+        working[row][col] = step["value"]
+        steps.append(step)
+
+    solved = all(value for row in working for value in row)
+    if not solved and len(steps) >= max_steps:
+        message = "教学步骤已达到缓存上限，请检查题目是否需要高级策略。"
+    for index, step in enumerate(steps, start=1):
+        step["step"] = index
+        step["total_steps"] = len(steps)
+    return {
+        "steps": steps,
+        "solved": solved,
+        "message": message,
+        "final_board": working,
+    }
+
+
 class SudokuApp:
     BG = "#F5F5F7"
     PANEL = "#ffffff"
@@ -68,6 +311,11 @@ class SudokuApp:
     DEFAULT_PANE_RATIO = 3 / 8
     MIN_BOARD_PANEL_WIDTH = 220
     MIN_SIDEBAR_WIDTH = 180
+    MIN_TEACHING_PANEL_WIDTH = 300
+    MIN_SIDEBAR_ACTIONS_HEIGHT = 220
+    MIN_LOG_PANEL_HEIGHT = 120
+    MIN_WINDOW_OPACITY = 0.40
+    BUTTON_MODE_GEOMETRY = "96x42"
     PANE_LAYOUT_KEY = "sidebar_left"
     BOARD_SHRINK_FLOOR = 0.56
     LOG_FLUSH_DELAY_MS = 60
@@ -144,8 +392,8 @@ class SudokuApp:
     def __init__(self, root):
         self.root = root
         self.root.title("数独助手")
-        self.root.geometry("880x790")
-        self.root.minsize(620, 460)
+        self.root.geometry("1120x790")
+        self.root.minsize(860, 500)
         self.root.resizable(True, True)
 
         self.code_dir = Path(__file__).resolve().parent
@@ -172,12 +420,14 @@ class SudokuApp:
         self.turbo_fill_enabled = tk.BooleanVar(value=saved_auto_fill_enabled)
         self.minimize_after_fill_enabled = tk.BooleanVar(value=bool(self._ui_state.get("minimize_after_fill", False)))
         self.theme_name = tk.StringVar(value=self._load_saved_theme_name())
+        saved_opacity = self._normalize_window_opacity(self._ui_state.get("window_opacity", 1.0))
+        self.window_opacity_var = tk.IntVar(value=int(round(saved_opacity * 100)))
         saved_difficulty = self._ui_state.get("generate_difficulty", "中等")
         if saved_difficulty not in {"简单", "中等", "困难", "专家"}:
             saved_difficulty = "中等"
         self.generate_difficulty = tk.StringVar(value=saved_difficulty)
-        self.status_var = tk.StringVar(value="就绪")
-        self.metrics_var = tk.StringVar(value="识别 - · 求解 - · 难度 -")
+        self.status_var = tk.StringVar(value="可按 Ctrl+O 导入图片，方向键可移动盘面")
+        self.metrics_var = tk.StringVar(value="已填 0/81 · 识别 - · 求解 - · 难度 -")
         self.last_fill_payload = None
         self.cell_sources = [["empty" for _ in range(9)] for _ in range(9)]
         self.ocr_confidence_map = None
@@ -189,6 +439,22 @@ class SudokuApp:
         self.hint_popup = None
         self.hint_focus_cells: set[tuple[int, int]] = set()
         self.hint_context_cells: set[tuple[int, int]] = set()
+        self.teaching_active = False
+        self.teaching_steps = []
+        self.teaching_current_step = -1
+        self.teaching_base_board = None
+        self.teaching_base_sources = None
+        self.teaching_focus_cells: set[tuple[int, int]] = set()
+        self.teaching_context_cells: set[tuple[int, int]] = set()
+        self.teaching_elimination_cells: set[tuple[int, int]] = set()
+        self.teaching_auto_play = False
+        self._teaching_autoplay_job = None
+        self.teaching_speed_var = tk.StringVar(value="1x")
+        self.teaching_step_var = tk.StringVar(value="步骤 0 / 0")
+        self.teaching_strategy_var = tk.StringVar(value="当前策略：未开始")
+        self.teaching_explanation_var = tk.StringVar(value="点击“开始教学”，系统会按人类可理解策略生成分步讲解。")
+        self.teaching_candidate_var = tk.StringVar(value="候选数：-")
+        self.teaching_message_var = tk.StringVar(value="优先使用唯一候选数和唯一位置。")
         self.log_stage_title_var = tk.StringVar(value="等待任务")
         self.log_stage_detail_var = tk.StringVar(value="准备就绪")
         self.updating_ui = False
@@ -196,6 +462,7 @@ class SudokuApp:
         self._theme_palette = {}
         self._apply_theme_values(self.theme_name.get(), self.custom_accent)
         self.root.configure(bg=self.BG)
+        self._apply_window_opacity(saved_opacity)
         self.saved_pane_ratio = self._load_saved_pane_ratio()
         self._pane_save_job = None
         self._board_resize_job = None
@@ -214,20 +481,33 @@ class SudokuApp:
         self._recognition_generation = 0
         self.pin_button = None
         self.settings_button = None
+        self.button_mode_toggle_button = None
         self.settings_window = None
         self.settings_panel = None
         self.settings_theme_check = None
         self.settings_auto_fill_check = None
         self.settings_clipboard_check = None
         self.settings_minimize_fill_check = None
+        self.settings_opacity_scale = None
+        self.settings_opacity_value_label = None
         self.settings_accent_button = None
         self.settings_accent_preview = None
         self._settings_dark_mode_var = tk.BooleanVar(value=self.theme_name.get() == "dark")
         self._pin_hover = False
+        self.button_mode_active = False
+        self.button_mode_frame = None
+        self.button_mode_button = None
+        self._normal_window_geometry = None
+        self._normal_window_minsize = None
+        self.button_mode_position = self._load_saved_button_mode_position()
+        self._button_mode_drag_offset = None
+        self._button_mode_drag_start = None
+        self._button_mode_drag_moved = False
         self._global_hotkey_thread = None
         self._global_hotkey_thread_id = None
         self._global_hotkey_id = 0x5344
         self.action_buttons = []
+        self._closing = False
         self.history = self._load_history()
         self.performance = {
             "last_ocr_ms": None,
@@ -298,19 +578,33 @@ class SudokuApp:
     def _setup_ui(self):
         self.root.option_add("*Font", "{Microsoft YaHei UI} 10")
 
-        shell = tk.Frame(self.root, bg=self.BG)
-        shell.pack(fill="both", expand=True, padx=14, pady=14)
-        shell.grid_columnconfigure(0, weight=1)
-        shell.grid_rowconfigure(1, weight=1)
+        self.shell = tk.Frame(self.root, bg=self.BG)
+        self.shell.pack(fill="both", expand=True, padx=14, pady=14)
+        self.shell.grid_columnconfigure(0, weight=1)
+        self.shell.grid_rowconfigure(1, weight=1)
 
-        self._build_topbar(shell)
-        self.main_pane = tk.PanedWindow(shell, orient="horizontal", bg=self.BG, bd=0, sashwidth=10, opaqueresize=True)
+        self._build_topbar(self.shell)
+        self.main_pane = tk.PanedWindow(self.shell, orient="horizontal", bg=self.BG, bd=0, sashwidth=10, opaqueresize=True)
         self.main_pane.grid(row=1, column=0, sticky="nsew")
 
         self.sidebar_column = tk.Frame(self.main_pane, bg=self.BG)
-        self._build_sidebar(self.sidebar_column)
-        self._build_log_panel(self.sidebar_column)
+        self.sidebar_pane = tk.PanedWindow(
+            self.sidebar_column,
+            orient="vertical",
+            bg=self.BG,
+            bd=0,
+            sashwidth=8,
+            opaqueresize=True,
+        )
+        self.sidebar_pane.pack(fill="both", expand=True)
+        self.sidebar_actions_pane = tk.Frame(self.sidebar_pane, bg=self.BG)
+        self.sidebar_log_pane = tk.Frame(self.sidebar_pane, bg=self.BG)
+        self._build_sidebar(self.sidebar_actions_pane)
+        self._build_log_panel(self.sidebar_log_pane)
+        self.sidebar_pane.add(self.sidebar_actions_pane, minsize=self.MIN_SIDEBAR_ACTIONS_HEIGHT)
+        self.sidebar_pane.add(self.sidebar_log_pane, minsize=self.MIN_LOG_PANEL_HEIGHT)
         board_panel = self._build_board(self.main_pane)
+        self._build_teaching_panel(self.main_pane)
 
         self.main_pane.add(self.sidebar_column, minsize=self.MIN_SIDEBAR_WIDTH)
         self.main_pane.add(board_panel, minsize=self.MIN_BOARD_PANEL_WIDTH)
@@ -329,7 +623,6 @@ class SudokuApp:
 
         title_box = tk.Frame(top, bg=self.BG)
         title_box.grid(row=0, column=0, sticky="w")
-        tk.Label(title_box, text="数独助手", bg=self.BG, fg=self.TEXT, font=("Microsoft YaHei UI", 16, "bold")).pack(anchor="w")
 
         pin_wrap = tk.Frame(top, bg=self.BG)
         pin_wrap.grid(row=0, column=1, sticky="e")
@@ -354,13 +647,52 @@ class SudokuApp:
         top = tk.Frame(parent, bg=self.BG)
         top.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         top.grid_columnconfigure(0, weight=1)
+        top.bind("<Configure>", self._update_sidebar_wraplength, add="+")
 
         title_box = tk.Frame(top, bg=self.BG)
-        title_box.grid(row=0, column=0, sticky="w")
-        tk.Label(title_box, text="数独助手", bg=self.BG, fg=self.TEXT, font=("Microsoft YaHei UI", 16, "bold")).pack(anchor="w")
+        title_box.grid(row=0, column=0, sticky="ew")
+        title_box.grid_columnconfigure(0, weight=1)
+
+        summary_row = tk.Frame(title_box, bg=self.BG)
+        summary_row.grid(row=0, column=0, sticky="ew")
+        summary_row.grid_columnconfigure(0, weight=1)
+        self.status_label = tk.Label(
+            summary_row,
+            textvariable=self.status_var,
+            bg=self.BG,
+            fg=self.TEXT,
+            font=("Microsoft YaHei UI", 9),
+            anchor="w",
+            justify="left",
+            wraplength=240,
+        )
+        self.status_label.grid(row=0, column=0, sticky="ew")
+        self.metrics_label = tk.Label(
+            summary_row,
+            textvariable=self.metrics_var,
+            bg=self.BG,
+            fg=self.MUTED,
+            font=("Microsoft YaHei UI", 8),
+            anchor="e",
+            justify="right",
+        )
+        self.metrics_label.grid(row=0, column=1, sticky="e", padx=(14, 0))
 
         self.topbar_tools = tk.Frame(top, bg=self.BG)
         self.topbar_tools.grid(row=0, column=1, sticky="e")
+
+        self.button_mode_toggle_button = self._make_action_button(
+            self.topbar_tools,
+            "按钮模式",
+            self.on_enter_button_mode,
+            self.PANEL,
+            self.TEXT,
+            outline=self.BORDER,
+            hover_bg=self.SOFT_BLUE,
+            padx=10,
+            pady=4,
+        )
+        self.button_mode_toggle_button.pack(side="right", padx=(0, 8))
 
         self.settings_button = tk.Button(
             self.topbar_tools,
@@ -414,6 +746,130 @@ class SudokuApp:
         self.pin_button.bind("<Enter>", self._on_pin_enter, add="+")
         self.pin_button.bind("<Leave>", self._on_pin_leave, add="+")
         self._refresh_pin_visual()
+
+    def _build_button_mode_frame(self):
+        if self.button_mode_frame is not None:
+            return
+        frame = tk.Frame(self.root, bg=self.BG, padx=4, pady=4)
+        self.button_mode_frame = frame
+        self.button_mode_button = tk.Label(
+            frame,
+            text="展开",
+            bg=self.PRIMARY,
+            fg="white",
+            activebackground=self.PRIMARY_HOVER,
+            activeforeground="white",
+            relief="flat",
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=self.PRIMARY,
+            cursor="hand2",
+            font=("Microsoft YaHei UI", 9, "bold"),
+            padx=14,
+            pady=7,
+        )
+        self.button_mode_button.pack(fill="both", expand=True)
+        for widget in (frame, self.button_mode_button):
+            widget.bind("<ButtonPress-1>", self._on_button_mode_drag_start, add="+")
+            widget.bind("<B1-Motion>", self._on_button_mode_drag, add="+")
+            widget.bind("<ButtonRelease-1>", self._on_button_mode_release, add="+")
+
+    def _on_button_mode_drag_start(self, event):
+        try:
+            self._button_mode_drag_offset = (
+                int(event.x_root) - self.root.winfo_x(),
+                int(event.y_root) - self.root.winfo_y(),
+            )
+            self._button_mode_drag_start = (int(event.x_root), int(event.y_root))
+        except (tk.TclError, TypeError, ValueError):
+            self._button_mode_drag_offset = None
+            self._button_mode_drag_start = None
+        self._button_mode_drag_moved = False
+
+    def _on_button_mode_drag(self, event):
+        if not self.button_mode_active or self._button_mode_drag_offset is None:
+            return
+        try:
+            event_x = int(event.x_root)
+            event_y = int(event.y_root)
+        except (TypeError, ValueError):
+            return
+        offset_x, offset_y = self._button_mode_drag_offset
+        target_x = event_x - offset_x
+        target_y = event_y - offset_y
+        if self._button_mode_drag_start is not None:
+            start_x, start_y = self._button_mode_drag_start
+            self._button_mode_drag_moved = self._button_mode_drag_moved or abs(event_x - start_x) > 3 or abs(event_y - start_y) > 3
+        try:
+            self.root.geometry(f"{self.BUTTON_MODE_GEOMETRY}+{target_x}+{target_y}")
+            self.button_mode_position = {"x": target_x, "y": target_y}
+        except tk.TclError:
+            pass
+
+    def _on_button_mode_release(self, _event=None):
+        moved = self._button_mode_drag_moved
+        self._button_mode_drag_offset = None
+        self._button_mode_drag_start = None
+        self._button_mode_drag_moved = False
+        if moved:
+            self._schedule_ui_state_save()
+        if not moved:
+            self.on_exit_button_mode()
+
+    def on_enter_button_mode(self):
+        if self.button_mode_active:
+            return
+        self._close_settings_window()
+        self._hide_candidate_popup()
+        self._build_button_mode_frame()
+
+        self.button_mode_active = True
+        self._normal_window_geometry = self.root.geometry()
+        try:
+            self._normal_window_minsize = self.root.minsize()
+        except tk.TclError:
+            self._normal_window_minsize = (860, 500)
+
+        self.shell.pack_forget()
+        self.button_mode_frame.pack(fill="both", expand=True)
+        try:
+            self.root.minsize(1, 1)
+            self.root.resizable(False, False)
+            self.root.overrideredirect(True)
+            if self.button_mode_position:
+                x = int(self.button_mode_position["x"])
+                y = int(self.button_mode_position["y"])
+                self.root.geometry(f"{self.BUTTON_MODE_GEOMETRY}+{x}+{y}")
+            else:
+                self.root.geometry(self.BUTTON_MODE_GEOMETRY)
+            self.root.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        self._set_status("已进入按钮模式，点击小按钮可恢复完整界面")
+
+    def on_exit_button_mode(self):
+        if not self.button_mode_active:
+            return
+        self.button_mode_active = False
+
+        if self.button_mode_frame is not None:
+            self.button_mode_frame.pack_forget()
+        self.shell.pack(fill="both", expand=True, padx=14, pady=14)
+        try:
+            self.root.overrideredirect(False)
+            min_width, min_height = self._normal_window_minsize or (860, 500)
+            self.root.minsize(min_width, min_height)
+            self.root.resizable(True, True)
+            if self._normal_window_geometry:
+                self.root.geometry(self._normal_window_geometry)
+            self.root.attributes("-topmost", self.pinned)
+        except tk.TclError:
+            pass
+        self._normal_window_geometry = None
+        self._normal_window_minsize = None
+        self._restore_pane_ratio()
+        self._schedule_board_resize()
+        self._set_status("已恢复完整界面")
 
     def _on_pin_enter(self, _event=None):
         self._pin_hover = True
@@ -552,6 +1008,7 @@ class SudokuApp:
                             font=self.CELL_FONT,
                         )
                         entry.pack(fill="both", expand=True)
+                        entry.bind("<KeyPress>", lambda e, r=row, c=col: self._on_cell_keypress(r, c, e), add="+")
                         entry.bind("<KeyRelease>", lambda _e, r=row, c=col: self._on_cell_edit(r, c))
                         entry.bind("<FocusOut>", lambda _e, r=row, c=col: self._on_cell_edit(r, c))
                         entry.bind("<Button-1>", lambda e, r=row, c=col: self._on_cell_click(r, c, e), add="+")
@@ -1098,7 +1555,7 @@ class SudokuApp:
 
         capture_btn = self._make_action_button(
             hero,
-            "▣  截图识别\nF2 快速抓取当前盘面",
+            "▣  截图识别\nF2",
             self.on_ocr,
             self.PRIMARY,
             "white",
@@ -1114,7 +1571,7 @@ class SudokuApp:
         solve_cta = "#34C759"
         solve_btn = self._make_action_button(
             hero,
-            "▶  一键求解\nCtrl+Enter 立即计算解答",
+            "▶  一键求解\nCtrl+Enter",
             self.on_solve,
             solve_cta,
             "white",
@@ -1139,6 +1596,7 @@ class SudokuApp:
             ("◇ 生成题目", self.on_generate_puzzle, self.SOFT_BLUE, self.TEXT, self.BORDER),
             ("✦ 提示一步", self.on_hint_step, self.SOFT_BLUE, self.TEXT, self.PRIMARY),
             ("▤ 历史记录", self.on_show_history, self.SUBTLE, self.TEXT, self.BORDER),
+            ("▥ 教学模式", self.on_start_teaching, self.SOFT_BLUE, self.TEXT, self.PRIMARY),
             ("⌫ 清除求解", self.on_clear_solution, self.PANEL, self.MUTED, self.BORDER),
             ("↺ 清空重置", self.on_clear, self.PANEL, self.MUTED, self.BORDER),
             ("⎘ 复制分享", self.on_copy_board, self.PANEL, self.MUTED, self.BORDER),
@@ -1175,6 +1633,207 @@ class SudokuApp:
             font=("Microsoft YaHei UI", 9),
         )
         self.generate_menu.pack(side="right")
+
+    def _build_teaching_panel(self, parent):
+        panel = tk.Frame(parent, bg=self.PANEL, highlightthickness=1, highlightbackground=self.BORDER)
+        self.teaching_panel = panel
+        panel.bind("<Configure>", self._update_teaching_wraplength, add="+")
+
+        head = tk.Frame(panel, bg=self.PANEL)
+        head.pack(fill="x", padx=14, pady=(12, 8))
+        tk.Label(head, text="教学模式", bg=self.PANEL, fg=self.TEXT, font=("Microsoft YaHei UI", 12, "bold")).pack(side="left")
+        self.teaching_start_button = self._make_action_button(
+            head,
+            "开始",
+            self.on_start_teaching,
+            self.PRIMARY,
+            "white",
+            outline=self.PRIMARY,
+            hover_bg=self.PRIMARY_HOVER,
+            font=("Microsoft YaHei UI", 8, "bold"),
+            padx=8,
+            pady=3,
+        )
+        self.teaching_start_button.pack(side="right")
+        self.teaching_header_exit_button = self._make_action_button(
+            head,
+            "退出",
+            self.on_teaching_exit,
+            self.PANEL,
+            self.MUTED,
+            outline=self.BORDER,
+            hover_bg=self.SUBTLE,
+            font=("Microsoft YaHei UI", 8, "bold"),
+            padx=8,
+            pady=3,
+        )
+        self.teaching_header_exit_button.pack(side="right", padx=(0, 8))
+
+        body = tk.Frame(panel, bg=self.PANEL)
+        body.pack(fill="both", expand=True, padx=14, pady=(0, 12))
+
+        self.teaching_step_label = tk.Label(
+            body,
+            textvariable=self.teaching_step_var,
+            bg=self.PANEL,
+            fg=self.PRIMARY,
+            font=("Microsoft YaHei UI", 13, "bold"),
+            anchor="w",
+        )
+        self.teaching_step_label.pack(fill="x", pady=(0, 8))
+        self.teaching_strategy_label = tk.Label(
+            body,
+            textvariable=self.teaching_strategy_var,
+            bg=self.SOFT_BLUE,
+            fg=self.TEXT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            anchor="w",
+            padx=10,
+            pady=7,
+            wraplength=220,
+        )
+        self.teaching_strategy_label.pack(fill="x", pady=(0, 8))
+        self.teaching_explanation_label = tk.Label(
+            body,
+            textvariable=self.teaching_explanation_var,
+            bg=self.PANEL,
+            fg=self.TEXT,
+            font=("Microsoft YaHei UI", 10),
+            anchor="nw",
+            justify="left",
+            wraplength=230,
+        )
+        self.teaching_explanation_label.pack(fill="both", expand=True, pady=(0, 10))
+        self.teaching_candidate_label = tk.Label(
+            body,
+            textvariable=self.teaching_candidate_var,
+            bg=self.SUBTLE,
+            fg=self.MUTED,
+            font=("Microsoft YaHei UI", 9),
+            anchor="w",
+            justify="left",
+            padx=10,
+            pady=7,
+            wraplength=220,
+        )
+        self.teaching_candidate_label.pack(fill="x", pady=(0, 10))
+
+        controls = tk.Frame(body, bg=self.PANEL)
+        controls.pack(fill="x", pady=(0, 8))
+        for column in range(3):
+            controls.grid_columnconfigure(column, weight=1)
+        self.teaching_prev_button = self._make_action_button(
+            controls,
+            "上一步",
+            self.on_teaching_prev,
+            self.PANEL,
+            self.TEXT,
+            outline=self.BORDER,
+            hover_bg=self.SUBTLE,
+            font=("Microsoft YaHei UI", 9, "bold"),
+            padx=6,
+            pady=7,
+        )
+        self.teaching_prev_button.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        self.teaching_next_button = self._make_action_button(
+            controls,
+            "下一步",
+            self.on_teaching_next,
+            self.PRIMARY,
+            "white",
+            outline=self.PRIMARY,
+            hover_bg=self.PRIMARY_HOVER,
+            font=("Microsoft YaHei UI", 9, "bold"),
+            padx=6,
+            pady=7,
+        )
+        self.teaching_next_button.grid(row=0, column=1, sticky="ew", padx=4)
+        self.teaching_autoplay_button = self._make_action_button(
+            controls,
+            "自动播放 ▶",
+            self.on_teaching_autoplay,
+            self.SOFT_BLUE,
+            self.TEXT,
+            outline=self.BORDER,
+            hover_bg=self._blend_color(self.SOFT_BLUE, self.TEXT, 0.08),
+            font=("Microsoft YaHei UI", 9, "bold"),
+            padx=6,
+            pady=7,
+        )
+        self.teaching_autoplay_button.grid(row=0, column=2, sticky="ew", padx=(4, 0))
+
+        speed_row = tk.Frame(body, bg=self.PANEL)
+        speed_row.pack(fill="x", pady=(0, 8))
+        tk.Label(speed_row, text="播放速度", bg=self.PANEL, fg=self.MUTED, font=("Microsoft YaHei UI", 9)).pack(side="left")
+        self.teaching_speed_menu = tk.OptionMenu(speed_row, self.teaching_speed_var, "0.5x", "1x", "2x")
+        self.teaching_speed_menu.config(
+            bg=self.PANEL,
+            fg=self.TEXT,
+            activebackground=self.SOFT_BLUE,
+            activeforeground=self.TEXT,
+            relief="flat",
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=self.BORDER,
+            cursor="hand2",
+            font=("Microsoft YaHei UI", 9),
+        )
+        self.teaching_speed_menu.pack(side="right")
+
+        self.teaching_exit_button = self._make_action_button(
+            body,
+            "退出教学",
+            self.on_teaching_exit,
+            self.PANEL,
+            self.MUTED,
+            outline=self.BORDER,
+            hover_bg=self.SUBTLE,
+            font=("Microsoft YaHei UI", 9, "bold"),
+            padx=8,
+            pady=7,
+        )
+        self.teaching_exit_button.pack(fill="x", pady=(0, 8))
+        self.teaching_message_label = tk.Label(
+            body,
+            textvariable=self.teaching_message_var,
+            bg=self.PANEL,
+            fg=self.MUTED,
+            font=("Microsoft YaHei UI", 8),
+            anchor="w",
+            justify="left",
+            wraplength=230,
+        )
+        self.teaching_message_label.pack(fill="x")
+        self._refresh_teaching_buttons()
+        return panel
+
+    def _teaching_wraplength_for_width(self, width):
+        try:
+            width = int(width)
+        except (TypeError, ValueError):
+            width = self.MIN_TEACHING_PANEL_WIDTH
+        return max(150, min(360, width - 44))
+
+    def _update_teaching_wraplength(self, event=None):
+        width = getattr(event, "width", None)
+        if width is None and hasattr(self, "teaching_panel"):
+            try:
+                width = self.teaching_panel.winfo_width()
+            except tk.TclError:
+                width = self.MIN_TEACHING_PANEL_WIDTH
+        wraplength = self._teaching_wraplength_for_width(width)
+        for name in (
+            "teaching_strategy_label",
+            "teaching_explanation_label",
+            "teaching_candidate_label",
+            "teaching_message_label",
+        ):
+            label = getattr(self, name, None)
+            if label is not None:
+                try:
+                    label.config(wraplength=wraplength)
+                except tk.TclError:
+                    pass
 
     def _build_log_panel(self, parent):
         panel = tk.Frame(parent, bg=self.PANEL, highlightthickness=1, highlightbackground=self.BORDER)
@@ -1436,6 +2095,41 @@ class SudokuApp:
     def _theme_button_text(self):
         return "浅色" if self.theme_name.get() == "dark" else "深色"
 
+    def _normalize_window_opacity(self, value, fallback=1.0):
+        try:
+            opacity = float(value)
+        except (TypeError, ValueError):
+            return fallback
+        if opacity > 1:
+            opacity /= 100
+        return min(1.0, max(self.MIN_WINDOW_OPACITY, opacity))
+
+    def _update_opacity_value_label(self):
+        if getattr(self, "settings_opacity_value_label", None) is None:
+            return
+        try:
+            self.settings_opacity_value_label.config(text=f"{self.window_opacity_var.get()}%")
+        except tk.TclError:
+            pass
+
+    def _apply_window_opacity(self, opacity):
+        opacity = self._normalize_window_opacity(opacity)
+        percent = int(round(opacity * 100))
+        if self.window_opacity_var.get() != percent:
+            self.window_opacity_var.set(percent)
+        try:
+            self.root.attributes("-alpha", opacity)
+        except tk.TclError:
+            pass
+        if getattr(self, "settings_window", None) is not None:
+            try:
+                if self.settings_window.winfo_exists():
+                    self.settings_window.attributes("-alpha", opacity)
+            except tk.TclError:
+                pass
+        self._update_opacity_value_label()
+        return opacity
+
     def _clear_settings_window_refs(self):
         self.settings_window = None
         self.settings_panel = None
@@ -1443,6 +2137,8 @@ class SudokuApp:
         self.settings_auto_fill_check = None
         self.settings_clipboard_check = None
         self.settings_minimize_fill_check = None
+        self.settings_opacity_scale = None
+        self.settings_opacity_value_label = None
         self.settings_accent_button = None
         self.settings_accent_preview = None
 
@@ -1469,6 +2165,16 @@ class SudokuApp:
             self.settings_window.configure(bg=self.BG)
             if self.settings_panel is not None:
                 self.settings_panel.config(bg=self.PANEL, highlightbackground=self.BORDER)
+            if self.settings_opacity_scale is not None:
+                self.settings_opacity_scale.config(
+                    bg=self.PANEL,
+                    fg=self.TEXT,
+                    activebackground=self.PRIMARY,
+                    troughcolor=self.SUBTLE,
+                    highlightbackground=self.PANEL,
+                )
+            if self.settings_opacity_value_label is not None:
+                self.settings_opacity_value_label.config(bg=self.PANEL, fg=self.MUTED)
             for check in (
                 self.settings_theme_check,
                 self.settings_auto_fill_check,
@@ -1486,6 +2192,7 @@ class SudokuApp:
                     )
             if self.settings_accent_preview is not None:
                 self.settings_accent_preview.config(bg=self.custom_accent or self.PRIMARY, highlightbackground=self.BORDER)
+            self._apply_window_opacity(self.window_opacity_var.get() / 100)
         except tk.TclError:
             self._clear_settings_window_refs()
 
@@ -1565,6 +2272,37 @@ class SudokuApp:
             pady=4,
         )
         self.settings_theme_check.pack(side="right")
+
+        opacity_row = add_row("窗口透明度", "调整整个软件窗口透明度")
+        opacity_controls = tk.Frame(opacity_row, bg=self.PANEL)
+        opacity_controls.pack(side="right")
+        self.settings_opacity_value_label = tk.Label(
+            opacity_controls,
+            text=f"{self.window_opacity_var.get()}%",
+            bg=self.PANEL,
+            fg=self.MUTED,
+            font=("Microsoft YaHei UI", 9, "bold"),
+            width=5,
+            anchor="e",
+        )
+        self.settings_opacity_value_label.pack(side="right", padx=(8, 0))
+        self.settings_opacity_scale = tk.Scale(
+            opacity_controls,
+            from_=int(self.MIN_WINDOW_OPACITY * 100),
+            to=100,
+            orient="horizontal",
+            variable=self.window_opacity_var,
+            command=self.on_window_opacity_change,
+            showvalue=False,
+            resolution=5,
+            length=150,
+            bg=self.PANEL,
+            fg=self.TEXT,
+            activebackground=self.PRIMARY,
+            troughcolor=self.SUBTLE,
+            highlightthickness=0,
+        )
+        self.settings_opacity_scale.pack(side="right")
 
         accent_row = add_row("主配色", "修改主要按钮和高亮颜色")
         accent_actions = tk.Frame(accent_row, bg=self.PANEL)
@@ -1775,6 +2513,12 @@ class SudokuApp:
                 self.generate_menu["menu"].config(bg=self.PANEL, fg=self.TEXT, activebackground=self.SOFT_BLUE, activeforeground=self.TEXT)
             except tk.TclError:
                 pass
+        if hasattr(self, "teaching_speed_menu"):
+            self.teaching_speed_menu.config(bg=self.PANEL, fg=self.TEXT, activebackground=self.SOFT_BLUE, highlightbackground=self.BORDER)
+            try:
+                self.teaching_speed_menu["menu"].config(bg=self.PANEL, fg=self.TEXT, activebackground=self.SOFT_BLUE, activeforeground=self.TEXT)
+            except tk.TclError:
+                pass
         self._configure_log_tags()
         self._refresh_all_cell_styles()
         self._update_metrics()
@@ -1785,6 +2529,11 @@ class SudokuApp:
         self._apply_theme(next_theme)
         self._schedule_ui_state_save()
         self._set_status(f"已切换为{'深色' if next_theme == 'dark' else '浅色'}模式")
+
+    def on_window_opacity_change(self, value):
+        opacity = self._normalize_window_opacity(float(value) / 100)
+        self._apply_window_opacity(opacity)
+        self._schedule_ui_state_save()
 
     def on_pick_accent_color(self):
         _rgb, selected = colorchooser.askcolor(color=self.PRIMARY, title="选择主色")
@@ -1824,6 +2573,17 @@ class SudokuApp:
             return self._normalize_pane_ratio(1 - ratio, self.DEFAULT_PANE_RATIO)
         return ratio
 
+    def _load_saved_button_mode_position(self):
+        position = self._ui_state.get("button_mode_position")
+        if not isinstance(position, dict):
+            return None
+        try:
+            x = int(position["x"])
+            y = int(position["y"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        return {"x": x, "y": y}
+
     def _get_current_pane_ratio(self):
         if not hasattr(self, "main_pane") or len(self.main_pane.panes()) < 2:
             return None
@@ -1852,7 +2612,10 @@ class SudokuApp:
             "minimize_after_fill": bool(self.minimize_after_fill_enabled.get()),
             "generate_difficulty": self.generate_difficulty.get(),
             "clipboard_monitor": bool(self.clipboard_monitor_enabled.get()),
+            "window_opacity": round(self._normalize_window_opacity(self.window_opacity_var.get() / 100), 2),
         }
+        if self.button_mode_position:
+            payload["button_mode_position"] = self.button_mode_position
         try:
             with self.ui_state_path.open("w", encoding="utf-8") as fh:
                 json.dump(payload, fh, ensure_ascii=False, indent=2)
@@ -1894,7 +2657,12 @@ class SudokuApp:
     def _update_sidebar_wraplength(self, _event=None):
         if not hasattr(self, "status_label") or not hasattr(self, "topbar_tools"):
             return
-        wraplength = max(120, min(240, self.topbar_tools.winfo_width() - 180))
+        try:
+            total_width = self.root.winfo_width()
+            tools_width = self.topbar_tools.winfo_width()
+        except tk.TclError:
+            return
+        wraplength = max(160, min(360, total_width - tools_width - 60))
         if wraplength == self._last_sidebar_wraplength:
             return
         self._last_sidebar_wraplength = wraplength
@@ -1916,6 +2684,11 @@ class SudokuApp:
             "<Control-Shift-c>": self.on_copy_board,
             "<Control-i>": self.on_hint_step,
             "<Control-I>": self.on_hint_step,
+            "<Control-t>": self.on_start_teaching,
+            "<Control-T>": self.on_start_teaching,
+            "<Control-Right>": self.on_teaching_next,
+            "<Control-Left>": self.on_teaching_prev,
+            "<Control-space>": self.on_teaching_autoplay,
         }
         for sequence, handler in shortcuts.items():
             self._bind_shortcut(sequence, handler)
@@ -1992,7 +2765,9 @@ class SudokuApp:
             except (AttributeError, tk.TclError):
                 continue
         if self._drop_enabled:
-            self._set_status("可拖入图片识别，也可按 Ctrl+O 导入")
+            self._set_status("可拖入图片识别，也可按 Ctrl+O 导入，方向键可移动盘面")
+        else:
+            self._set_status("按 Ctrl+O 导入图片，方向键可移动盘面")
 
     def _on_file_drop(self, event):
         paths = self._parse_dropped_files(getattr(event, "data", ""))
@@ -2069,10 +2844,20 @@ class SudokuApp:
     def _update_metrics(self):
         if not hasattr(self, "metrics_var"):
             return
+        board = self._get_board_from_ui() if hasattr(self, "cells") else self.original_board
+        filled = sum(1 for row in board for value in row if value)
+        conflicts = len(self._find_conflicts(board)) if filled else 0
+        low_confidence = len(self.low_confidence_cells) if getattr(self, "low_confidence_cells", None) else 0
         ocr = "-" if self.performance["last_ocr_ms"] is None else f"{self.performance['last_ocr_ms'] / 1000:.2f}s"
         solve = "-" if self.performance["last_solve_ms"] is None else f"{self.performance['last_solve_ms']:.0f}ms"
         difficulty = self.performance["last_difficulty"] or "-"
-        self.metrics_var.set(f"识别 {ocr} · 求解 {solve} · 难度 {difficulty}")
+        pieces = [f"已填 {filled}/81"]
+        if conflicts:
+            pieces.append(f"冲突 {conflicts}")
+        if low_confidence:
+            pieces.append(f"低置信 {low_confidence}")
+        pieces.extend([f"识别 {ocr}", f"求解 {solve}", f"难度 {difficulty}"])
+        self.metrics_var.set(" · ".join(pieces))
 
     def _record_perf(self, kind, elapsed_ms):
         if kind == "ocr":
@@ -2479,6 +3264,7 @@ class SudokuApp:
         difficulty = self.generate_difficulty.get()
         self._generation_running = True
         self._cancel_solution_animation()
+        self._exit_teaching_mode(silent=True)
         self._set_status(f"正在生成{difficulty}题目")
         self._log("INFO", f"开始生成{difficulty}数独题目")
 
@@ -2843,6 +3629,17 @@ class SudokuApp:
         if (row, col) in self.hint_focus_cells:
             base_bg = self._blend_color(self.SOFT_BLUE, self.PRIMARY, 0.16)
             frame_color = self.PRIMARY
+        if (row, col) in self.teaching_context_cells:
+            base_bg = self._blend_color(base_bg, self.PRIMARY, 0.10)
+            frame_color = self._blend_color(frame_color, self.PRIMARY, 0.16)
+        if (row, col) in self.teaching_elimination_cells:
+            base_bg = self._blend_color(base_bg, self.MUTED, 0.10)
+            frame_color = self._blend_color(frame_color, self.MUTED, 0.22)
+            color = self.MUTED
+        if (row, col) in self.teaching_focus_cells:
+            base_bg = self.CELL_WARNING
+            frame_color = self.PRIMARY
+            color = self.TEXT
         if (row, col) in self.low_confidence_cells:
             frame_color = self.CELL_WARNING
 
@@ -2858,6 +3655,7 @@ class SudokuApp:
     def _set_board(self, board, source):
         if hasattr(self, "_solution_anim_job") and self._solution_anim_job is not None:
             self._cancel_solution_animation()
+        self._exit_teaching_mode(silent=True)
         self._clear_hint_feedback(refresh=False)
         self._hide_candidate_popup()
         self.selected_cell = None
@@ -2879,10 +3677,13 @@ class SudokuApp:
                     self.cell_sources[row][col] = "empty"
         self.updating_ui = False
         self._refresh_all_cell_styles()
+        self._update_metrics()
 
     def _on_cell_edit(self, row, col):
         if self.updating_ui:
             return
+        if self.teaching_active:
+            self._exit_teaching_mode(silent=True)
         self.low_confidence_cells.discard((row, col))
         self.selected_cell = (row, col)
         value = self._normalize_cell_text(row, col)
@@ -2894,17 +3695,56 @@ class SudokuApp:
         else:
             self.cell_sources[row][col] = "manual"
         self._refresh_cell_style(row, col)
+        self._update_metrics()
 
     def _on_cell_click(self, row, col, _event=None):
         self._clear_hint_feedback(refresh=False)
-        value = self._normalize_cell_text(row, col)
+        self._select_cell(row, col, open_popup=True)
+
+    def _select_cell(self, row, col, open_popup=False, focus=True):
+        row = max(0, min(8, row))
+        col = max(0, min(8, col))
         self._hide_candidate_popup()
         self.selected_cell = (row, col)
+        value = self._normalize_cell_text(row, col)
         self.selected_digit = value or None
         self.selected_candidate_cell = (row, col) if value == 0 else None
+        if focus:
+            try:
+                self.cells[row][col].focus_set()
+            except tk.TclError:
+                pass
         self._refresh_all_cell_styles()
-        candidates = self._candidates_for_cell(self._get_board_from_ui(), row, col)
-        self._show_candidate_popup(row, col, candidates, value)
+        if open_popup:
+            candidates = self._candidates_for_cell(self._get_board_from_ui(), row, col)
+            self._show_candidate_popup(row, col, candidates, value)
+        return value
+
+    def _on_cell_keypress(self, row, col, event):
+        if self.updating_ui:
+            return None
+        key = getattr(event, "keysym", "")
+        if key in {"Up", "Down", "Left", "Right"}:
+            deltas = {
+                "Up": (-1, 0),
+                "Down": (1, 0),
+                "Left": (0, -1),
+                "Right": (0, 1),
+            }
+            delta_row, delta_col = deltas[key]
+            self._select_cell(row + delta_row, col + delta_col, open_popup=False, focus=True)
+            return "break"
+        if key == "Tab":
+            shift_pressed = bool(getattr(event, "state", 0) & 0x0001)
+            index = row * 9 + col + (-1 if shift_pressed else 1)
+            index = max(0, min(80, index))
+            self._select_cell(index // 9, index % 9, open_popup=False, focus=True)
+            return "break"
+        if key in {"Return", "KP_Enter"}:
+            shift_pressed = bool(getattr(event, "state", 0) & 0x0001)
+            self._select_cell(row - 1 if shift_pressed else row + 1, col, open_popup=False, focus=True)
+            return "break"
+        return None
 
     def _candidates_for_cell(self, board, row, col):
         if board[row][col]:
@@ -2980,6 +3820,7 @@ class SudokuApp:
         self.selected_digit = value or None
         self.selected_candidate_cell = None
         self._refresh_all_cell_styles()
+        self._update_metrics()
 
     def _hide_candidate_popup(self):
         if self.candidate_popup is None:
@@ -3172,6 +4013,229 @@ class SudokuApp:
         self._show_hint_popup(target_cell[0], target_cell[1], message)
         self._hint_clear_job = self.root.after(3600, self._clear_hint_feedback)
 
+    def _track_teaching_event(self, event, **payload):
+        details = {"event": event}
+        details.update(payload)
+        self.logger.info("TEACHING_EVENT " + json.dumps(details, ensure_ascii=False))
+
+    def _is_teaching_panel_visible(self):
+        if not hasattr(self, "main_pane") or not hasattr(self, "teaching_panel"):
+            return False
+        try:
+            return str(self.teaching_panel) in {str(pane) for pane in self.main_pane.panes()}
+        except tk.TclError:
+            return False
+
+    def _show_teaching_panel(self):
+        if self._is_teaching_panel_visible():
+            return
+        try:
+            self.main_pane.add(self.teaching_panel, minsize=self.MIN_TEACHING_PANEL_WIDTH)
+        except tk.TclError:
+            return
+        self._schedule_board_resize()
+
+    def _hide_teaching_panel(self):
+        if not self._is_teaching_panel_visible():
+            return
+        try:
+            self.main_pane.forget(self.teaching_panel)
+        except tk.TclError:
+            return
+        self._schedule_board_resize()
+
+    def _refresh_teaching_buttons(self):
+        if not hasattr(self, "teaching_prev_button"):
+            return
+        active = self.teaching_active and bool(self.teaching_steps)
+        last_index = len(self.teaching_steps) - 1
+        prev_state = "normal" if active and self.teaching_current_step >= 0 else "disabled"
+        next_state = "normal" if active and self.teaching_current_step < last_index else "disabled"
+        auto_state = "normal" if active and self.teaching_current_step < last_index else "disabled"
+        exit_state = "normal" if self.teaching_active else "disabled"
+        start_state = "disabled" if self.teaching_active else "normal"
+        start_text = "教学中" if self.teaching_active else "开始"
+        self.teaching_start_button.config(state=start_state, text=start_text)
+        self.teaching_prev_button.config(state=prev_state)
+        self.teaching_next_button.config(state=next_state)
+        self.teaching_autoplay_button.config(
+            state=auto_state,
+            text="停止播放 ❚❚" if self.teaching_auto_play else "自动播放 ▶",
+        )
+        self.teaching_exit_button.config(state=exit_state)
+        self.teaching_header_exit_button.config(state=exit_state)
+
+    def _teaching_speed_value(self):
+        value = self.teaching_speed_var.get()
+        return {"0.5x": 0.5, "1x": 1.0, "2x": 2.0}.get(value, 1.0)
+
+    def _teaching_delay_ms(self):
+        speed = self._teaching_speed_value()
+        return int({0.5: 2000, 1.0: 1500, 2.0: 1000}.get(speed, 1500))
+
+    def _cancel_teaching_autoplay(self):
+        if self._teaching_autoplay_job is not None:
+            try:
+                self.root.after_cancel(self._teaching_autoplay_job)
+            except tk.TclError:
+                pass
+            self._teaching_autoplay_job = None
+        self.teaching_auto_play = False
+
+    def _reset_teaching_panel(self, message=None):
+        self.teaching_step_var.set("步骤 0 / 0")
+        self.teaching_strategy_var.set("当前策略：未开始")
+        self.teaching_explanation_var.set("点击“开始教学”，系统会按人类可理解策略生成分步讲解。")
+        self.teaching_candidate_var.set("候选数：-")
+        self.teaching_message_var.set(message or "优先使用唯一候选数和唯一位置。")
+        self._refresh_teaching_buttons()
+
+    def _exit_teaching_mode(self, silent=False):
+        was_active = self.teaching_active
+        self._cancel_teaching_autoplay()
+        self.teaching_active = False
+        self.teaching_steps = []
+        self.teaching_current_step = -1
+        self.teaching_base_board = None
+        self.teaching_base_sources = None
+        self.teaching_focus_cells.clear()
+        self.teaching_context_cells.clear()
+        self.teaching_elimination_cells.clear()
+        self._reset_teaching_panel()
+        self._hide_teaching_panel()
+        if hasattr(self, "cells"):
+            self._refresh_all_cell_styles()
+        if was_active and not silent:
+            self._track_teaching_event("teaching_exit")
+            self._set_status("已退出教学模式")
+
+    def _board_for_teaching_start(self):
+        current_board = self._get_board_from_ui()
+        board = [[0 for _ in range(9)] for _ in range(9)]
+        sources = [["empty" for _ in range(9)] for _ in range(9)]
+        for row in range(9):
+            for col in range(9):
+                source = self.cell_sources[row][col]
+                value = current_board[row][col]
+                board[row][col] = value
+                sources[row][col] = source if value else "empty"
+        return board, sources
+
+    def _cells_from_teaching_payload(self, cells):
+        resolved = set()
+        for cell in cells or ():
+            try:
+                row = int(cell["row"]) - 1
+                col = int(cell["col"]) - 1
+            except (KeyError, TypeError, ValueError):
+                continue
+            if 0 <= row < 9 and 0 <= col < 9:
+                resolved.add((row, col))
+        return resolved
+
+    def _set_teaching_highlight(self, step):
+        self.teaching_focus_cells.clear()
+        self.teaching_context_cells.clear()
+        self.teaching_elimination_cells.clear()
+        if not step:
+            return
+        row = step["position"]["row"] - 1
+        col = step["position"]["col"] - 1
+        self.teaching_focus_cells.add((row, col))
+        highlight = step.get("highlight", {})
+        self.teaching_context_cells = self._cells_from_teaching_payload(highlight.get("context_cells"))
+        self.teaching_elimination_cells = self._cells_from_teaching_payload(highlight.get("eliminated_cells"))
+
+    def _render_teaching_board(self, step_index):
+        if self.teaching_base_board is None or self.teaching_base_sources is None:
+            return
+        self.updating_ui = True
+        try:
+            for row in range(9):
+                for col in range(9):
+                    value = self.teaching_base_board[row][col]
+                    self.cells[row][col].delete(0, tk.END)
+                    if value:
+                        self.cells[row][col].insert(0, str(value))
+                    self.cell_sources[row][col] = self.teaching_base_sources[row][col] if value else "empty"
+            for index in range(step_index + 1):
+                step = self.teaching_steps[index]
+                row = step["position"]["row"] - 1
+                col = step["position"]["col"] - 1
+                self.cells[row][col].delete(0, tk.END)
+                self.cells[row][col].insert(0, str(step["value"]))
+                self.cell_sources[row][col] = "solution"
+                self.low_confidence_cells.discard((row, col))
+        finally:
+            self.updating_ui = False
+
+        if step_index >= 0:
+            step = self.teaching_steps[step_index]
+            row = step["position"]["row"] - 1
+            col = step["position"]["col"] - 1
+            self.selected_cell = (row, col)
+            self.selected_digit = step["value"]
+            self.selected_candidate_cell = None
+            self._set_teaching_highlight(step)
+        else:
+            self.selected_cell = None
+            self.selected_digit = None
+            self.selected_candidate_cell = None
+            self._set_teaching_highlight(None)
+        self._refresh_all_cell_styles()
+        self._update_metrics()
+
+    def _show_teaching_step(self, index):
+        if not self.teaching_steps:
+            self._reset_teaching_panel()
+            return
+        index = max(-1, min(len(self.teaching_steps) - 1, index))
+        self.teaching_current_step = index
+        self._render_teaching_board(index)
+
+        total = len(self.teaching_steps)
+        if index < 0:
+            self.teaching_step_var.set(f"步骤 0 / {total}")
+            self.teaching_strategy_var.set("当前策略：准备开始")
+            self.teaching_explanation_var.set("点击“下一步”查看第 1 步推理。")
+            self.teaching_candidate_var.set("候选数：-")
+            self.teaching_message_var.set("盘面已回到教学起点。")
+        else:
+            step = self.teaching_steps[index]
+            self.teaching_step_var.set(f"步骤 {step['step']} / {step['total_steps']}")
+            self.teaching_strategy_var.set(f"当前策略：{step['strategy_label']}")
+            self.teaching_explanation_var.set(step["explanation"])
+            self.teaching_candidate_var.set(
+                "候选数："
+                + "、".join(str(value) for value in step["candidates_before"])
+                + " → "
+                + "、".join(str(value) for value in step["candidates_after"])
+            )
+            highlight = step.get("highlight", {})
+            self.teaching_message_var.set(
+                f"高亮：第{highlight.get('row')}行、第{highlight.get('col')}列、"
+                f"第{highlight.get('block')}宫；灰色为排除依据。"
+            )
+        self._refresh_teaching_buttons()
+
+    def _schedule_teaching_autoplay(self):
+        if not self.teaching_auto_play or not self.teaching_active:
+            return
+        self._teaching_autoplay_job = self.root.after(self._teaching_delay_ms(), self._teaching_autoplay_tick)
+
+    def _teaching_autoplay_tick(self):
+        self._teaching_autoplay_job = None
+        if not self.teaching_auto_play or not self.teaching_active:
+            return
+        if self.teaching_current_step >= len(self.teaching_steps) - 1:
+            self._cancel_teaching_autoplay()
+            self._refresh_teaching_buttons()
+            self._set_status("教学自动播放已完成")
+            return
+        self._show_teaching_step(self.teaching_current_step + 1)
+        self._track_teaching_event("auto_play_step", step=self.teaching_current_step + 1)
+        self._schedule_teaching_autoplay()
+
     def _peer_cells(self, row, col) -> set[tuple[int, int]]:
         peers: set[tuple[int, int]] = {(row, index) for index in range(9)}
         peers.update((index, col) for index in range(9))
@@ -3243,6 +4307,7 @@ class SudokuApp:
                     self.cell_sources[row][col] = "solution"
         self.updating_ui = False
         self._refresh_all_cell_styles()
+        self._update_metrics()
 
     def _animate_solution_to_ui(self, solution, base_board):
         cells_to_fill = [
@@ -3268,6 +4333,7 @@ class SudokuApp:
                 self.updating_ui = False
                 self._solution_anim_job = None
                 self._refresh_all_cell_styles()
+                self._update_metrics()
                 return
 
             row, col = cells_to_fill[index]
@@ -3810,12 +4876,23 @@ class SudokuApp:
     def on_manual_ocr(self):
         self._log("INFO", "开始手动框选截图识别流程")
         self._set_status("请选择数独区域")
+        area = None
+        screenshot = None
+        fill_target_window = None
         try:
             self.root.withdraw()
             self.root.update_idletasks()
             time.sleep(0.2)
             selector = ScreenshotSelector(self.root)
             area = selector.get_selection()
+            if area:
+                time.sleep(0.05)
+                try:
+                    screenshot = pyautogui.screenshot(region=area)
+                    fill_target_window = self._capture_window_for_grid(area)
+                except Exception as exc:
+                    self._log("ERROR", f"手动截图失败: {exc}\n{traceback.format_exc()}")
+                    screenshot = None
         finally:
             self._restore_window()
 
@@ -3823,19 +4900,127 @@ class SudokuApp:
             self._log("INFO", "截图识别已取消")
             self._set_status("截图已取消")
             return
+        if screenshot is None:
+            self._set_status("截图失败")
+            self._show_error("截图失败", "未能截取所选区域，请确认目标窗口没有最小化，并允许当前程序截屏。")
+            return
 
         self.grid_coords = area
-        fill_target_window = self._capture_window_for_grid(area)
         self._log("INFO", f"截图区域: {area}")
         self._start_image_recognition(
-            lambda: pyautogui.screenshot(region=area),
+            screenshot,
             f"手动截图区域: {area}",
             detect_grid_bounds=True,
             grid_offset=(area[0], area[1]),
             fill_target_window=fill_target_window,
         )
 
+    def on_start_teaching(self):
+        self._cancel_solution_animation()
+        self._clear_hint_feedback(refresh=False)
+        self._hide_candidate_popup()
+
+        if self.teaching_active:
+            self._show_teaching_panel()
+            self._refresh_teaching_buttons()
+            self._set_status("已在教学模式中，可继续上一步/下一步；如需重来请先退出教学。")
+            return
+
+        board, sources = self._board_for_teaching_start()
+
+        if not self._board_has_values(board):
+            self._show_warning("无法进入教学", "当前盘面为空。请先导入、识别、生成或手动输入题目。")
+            self._set_status("盘面为空，无法进入教学模式")
+            return
+
+        conflicts = self._find_conflicts(board)
+        if conflicts:
+            self._mark_conflicts(conflicts)
+            detail = self._describe_conflicts(board)
+            self._show_warning("盘面冲突", "当前盘面有重复数字，请先修正。\n\n" + (detail or self._format_conflicts(conflicts, board)))
+            self._set_status("盘面冲突，无法进入教学模式")
+            return
+
+        started = time.perf_counter()
+        plan = build_teaching_plan(board)
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        steps = plan["steps"]
+        self._track_teaching_event(
+            "enter_teaching_mode",
+            total_steps=len(steps),
+            solved=bool(plan["solved"]),
+            elapsed_ms=round(elapsed_ms, 1),
+        )
+
+        if not steps:
+            self._exit_teaching_mode(silent=True)
+            self.teaching_explanation_var.set(plan["message"])
+            self.teaching_message_var.set("没有可展示的教学步骤。")
+            self._set_status(plan["message"])
+            return
+
+        self._cancel_teaching_autoplay()
+        self.teaching_active = True
+        self.teaching_steps = steps
+        self.teaching_current_step = -1
+        self.teaching_base_board = [row[:] for row in board]
+        self.teaching_base_sources = [row[:] for row in sources]
+        self._show_teaching_panel()
+        self._show_teaching_step(0)
+        self._log("INFO", f"教学模式生成 {len(steps)} 步，耗时 {elapsed_ms:.0f}ms")
+        if plan["solved"]:
+            self._set_status(f"教学模式已生成 {len(steps)} 步")
+        else:
+            self._set_status(plan["message"])
+            self.teaching_message_var.set(plan["message"])
+
+    def on_teaching_prev(self):
+        if not self.teaching_active:
+            return
+        if self.teaching_current_step < 0:
+            return
+        self._cancel_teaching_autoplay()
+        self._show_teaching_step(self.teaching_current_step - 1)
+        self._track_teaching_event("prev_step_click", step=self.teaching_current_step + 1)
+
+    def on_teaching_next(self):
+        if not self.teaching_active:
+            self.on_start_teaching()
+            return
+        if self.teaching_current_step >= len(self.teaching_steps) - 1:
+            self._set_status("已到最后一步")
+            return
+        self._show_teaching_step(self.teaching_current_step + 1)
+        self._track_teaching_event("next_step_click", step=self.teaching_current_step + 1)
+
+    def on_teaching_autoplay(self):
+        if not self.teaching_active:
+            self.on_start_teaching()
+            if not self.teaching_active:
+                return
+        if self.teaching_current_step >= len(self.teaching_steps) - 1:
+            self._set_status("已到最后一步，无法自动播放")
+            return
+        if self.teaching_auto_play:
+            self._cancel_teaching_autoplay()
+            self._track_teaching_event("auto_play_stop", step=self.teaching_current_step + 1)
+            self._set_status("教学自动播放已暂停")
+        else:
+            self.teaching_auto_play = True
+            self._track_teaching_event(
+                "auto_play_start",
+                step=self.teaching_current_step + 1,
+                speed=self.teaching_speed_var.get(),
+            )
+            self._schedule_teaching_autoplay()
+            self._set_status(f"教学自动播放中 · {self.teaching_speed_var.get()}")
+        self._refresh_teaching_buttons()
+
+    def on_teaching_exit(self):
+        self._exit_teaching_mode(silent=False)
+
     def on_solve(self):
+        self._exit_teaching_mode(silent=True)
         self._solve_current_board(auto_fill_after=False)
 
     def on_calibrate(self):
@@ -3865,6 +5050,7 @@ class SudokuApp:
         self._start_fill(auto_started=False)
 
     def on_hint_step(self):
+        self._exit_teaching_mode(silent=True)
         board = self._get_board_from_ui()
         conflicts = self._find_conflicts(board)
         if conflicts:
@@ -3895,6 +5081,7 @@ class SudokuApp:
 
     def on_clear_solution(self):
         self._cancel_solution_animation()
+        self._exit_teaching_mode(silent=True)
         self._clear_hint_feedback(refresh=False)
         self._hide_candidate_popup()
         self.selected_cell = None
@@ -3911,6 +5098,7 @@ class SudokuApp:
         self.updating_ui = False
         self.solution = None
         self._refresh_all_cell_styles()
+        self._update_metrics()
         if cleared:
             self._log("INFO", "已清除求解填入的数字，保留手动输入内容")
             self._set_status("已清除求解结果")
@@ -3920,6 +5108,7 @@ class SudokuApp:
 
     def on_clear(self):
         self._cancel_solution_animation()
+        self._exit_teaching_mode(silent=True)
         self._clear_hint_feedback(refresh=False)
         self._hide_candidate_popup()
         self.selected_cell = None
@@ -3943,6 +5132,7 @@ class SudokuApp:
         self._recognition_started_at = None
         self._log("INFO", "已清空界面和缓存状态")
         self._set_status("已重置")
+        self._update_metrics()
 
     def on_toggle_fast_auto_fill(self):
         enabled = bool(self.auto_fill_enabled.get())
@@ -3997,6 +5187,10 @@ class SudokuApp:
         self._set_status(f"窗口置顶已{'开启' if self.pinned else '关闭'}")
 
     def on_close(self):
+        if self._closing:
+            return
+        self._closing = True
+        self._cancel_teaching_autoplay()
         self._teardown_global_hotkeys()
         self._cancel_solution_animation()
         self._clear_hint_feedback(refresh=False)
@@ -4014,10 +5208,29 @@ class SudokuApp:
             self.root.after_cancel(self._log_flush_job)
             self._log_flush_job = None
         self._save_ui_state()
-        self.root.destroy()
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
+
+
+def main():
+    root = TkinterDnD.Tk() if TkinterDnD is not None else tk.Tk()
+    app = None
+    try:
+        app = SudokuApp(root)
+        root.mainloop()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        try:
+            if app is not None:
+                app.on_close()
+            else:
+                root.destroy()
+        except tk.TclError:
+            pass
 
 
 if __name__ == "__main__":
-    root = TkinterDnD.Tk() if TkinterDnD is not None else tk.Tk()
-    app = SudokuApp(root)
-    root.mainloop()
+    main()

@@ -593,7 +593,7 @@ class SudokuApp:
     MIN_SIDEBAR_ACTIONS_HEIGHT = 220
     MIN_LOG_PANEL_HEIGHT = 120
     MIN_WINDOW_OPACITY = 0.40
-    BUTTON_MODE_GEOMETRY = "96x42"
+    BUTTON_MODE_GEOMETRY = "156x42"
     PANE_LAYOUT_KEY = "sidebar_left"
     BOARD_SHRINK_FLOOR = 0.56
     LOG_FLUSH_DELAY_MS = 60
@@ -670,7 +670,7 @@ class SudokuApp:
     def __init__(self, root):
         self.root = root
         self.root.title("数独助手")
-        self.root.geometry("1120x790")
+        self.root.geometry("1040x720")
         self.root.minsize(860, 500)
         self.root.resizable(True, True)
 
@@ -775,12 +775,15 @@ class SudokuApp:
         self.button_mode_active = False
         self.button_mode_frame = None
         self.button_mode_button = None
+        self.button_mode_ocr_button = None
         self._normal_window_geometry = None
         self._normal_window_minsize = None
         self.button_mode_position = self._load_saved_button_mode_position()
         self._button_mode_drag_offset = None
         self._button_mode_drag_start = None
         self._button_mode_drag_moved = False
+        self._button_mode_pending_action = None
+        self._enter_button_mode_job = None
         self._global_hotkey_thread = None
         self._global_hotkey_thread_id = None
         self._global_hotkey_id = 0x5344
@@ -1022,7 +1025,7 @@ class SudokuApp:
         self.button_mode_toggle_button = self._make_action_button(
             self.topbar_tools,
             "按钮模式",
-            self.on_enter_button_mode,
+            self.on_request_button_mode,
             self.PANEL,
             self.TEXT,
             outline=self.BORDER,
@@ -1076,8 +1079,10 @@ class SudokuApp:
             return
         frame = tk.Frame(self.root, bg=self.BG, padx=4, pady=4)
         self.button_mode_frame = frame
+        buttons = tk.Frame(frame, bg=self.BG)
+        buttons.pack(fill="both", expand=True)
         self.button_mode_button = tk.Label(
-            frame,
+            buttons,
             text="展开",
             bg=self.PRIMARY,
             fg="white",
@@ -1092,13 +1097,51 @@ class SudokuApp:
             padx=14,
             pady=7,
         )
-        self.button_mode_button.pack(fill="both", expand=True)
-        for widget in (frame, self.button_mode_button):
-            widget.bind("<ButtonPress-1>", self._on_button_mode_drag_start, add="+")
-            widget.bind("<B1-Motion>", self._on_button_mode_drag, add="+")
-            widget.bind("<ButtonRelease-1>", self._on_button_mode_release, add="+")
+        self.button_mode_button.pack(side="left", fill="both", expand=True)
+        self.button_mode_ocr_button = tk.Label(
+            buttons,
+            text="识别",
+            bg=self.SOFT_BLUE,
+            fg=self.TEXT,
+            activebackground=self._hover_color(self.SOFT_BLUE),
+            activeforeground=self.TEXT,
+            relief="flat",
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=self.BORDER,
+            cursor="hand2",
+            font=("Microsoft YaHei UI", 9, "bold"),
+            padx=10,
+            pady=7,
+        )
+        self.button_mode_ocr_button.pack(side="left", padx=(6, 0))
+        self._bind_button_mode_widget(frame, self.on_exit_button_mode)
+        self._bind_button_mode_widget(buttons, self.on_exit_button_mode)
+        self._bind_button_mode_widget(self.button_mode_button, self.on_exit_button_mode)
+        self._bind_button_mode_widget(self.button_mode_ocr_button, self.on_ocr)
 
-    def _on_button_mode_drag_start(self, event):
+    def _bind_button_mode_widget(self, widget, action):
+        widget.bind("<ButtonPress-1>", lambda event, command=action: self._on_button_mode_drag_start(event, command), add="+")
+        widget.bind("<B1-Motion>", self._on_button_mode_drag, add="+")
+        widget.bind("<ButtonRelease-1>", self._on_button_mode_release, add="+")
+
+    def _button_mode_geometry(self):
+        if self.button_mode_position:
+            x = int(self.button_mode_position["x"])
+            y = int(self.button_mode_position["y"])
+            return f"{self.BUTTON_MODE_GEOMETRY}+{x}+{y}"
+        return self.BUTTON_MODE_GEOMETRY
+
+    def _button_mode_topmost_enabled(self):
+        return True if self.button_mode_active else self.pinned
+
+    def _apply_button_mode_window_state(self):
+        self.root.overrideredirect(True)
+        self.root.geometry(self._button_mode_geometry())
+        self.root.attributes("-topmost", True)
+
+    def _on_button_mode_drag_start(self, event, action=None):
+        self._button_mode_pending_action = action
         try:
             self._button_mode_drag_offset = (
                 int(event.x_root) - self.root.winfo_x(),
@@ -1132,13 +1175,36 @@ class SudokuApp:
 
     def _on_button_mode_release(self, _event=None):
         moved = self._button_mode_drag_moved
+        action = self._button_mode_pending_action
         self._button_mode_drag_offset = None
         self._button_mode_drag_start = None
         self._button_mode_drag_moved = False
+        self._button_mode_pending_action = None
         if moved:
             self._schedule_ui_state_save()
-        if not moved:
-            self.on_exit_button_mode()
+            return
+        if action is not None:
+            action()
+            return
+        self.on_exit_button_mode()
+
+    def on_request_button_mode(self):
+        if self.button_mode_active or self._closing:
+            return False
+        if self._enter_button_mode_job is not None:
+            return True
+
+        def enter():
+            self._enter_button_mode_job = None
+            if not self.button_mode_active and not self._closing:
+                self.on_enter_button_mode()
+
+        try:
+            self._enter_button_mode_job = self.root.after(80, enter)
+        except (tk.TclError, RuntimeError):
+            self._enter_button_mode_job = None
+            self.on_enter_button_mode()
+        return True
 
     def on_enter_button_mode(self):
         if self.button_mode_active:
@@ -1160,17 +1226,10 @@ class SudokuApp:
         try:
             self.root.minsize(1, 1)
             self.root.resizable(False, False)
-            self.root.overrideredirect(True)
-            if self.button_mode_position:
-                x = int(self.button_mode_position["x"])
-                y = int(self.button_mode_position["y"])
-                self.root.geometry(f"{self.BUTTON_MODE_GEOMETRY}+{x}+{y}")
-            else:
-                self.root.geometry(self.BUTTON_MODE_GEOMETRY)
-            self.root.attributes("-topmost", True)
+            self._apply_button_mode_window_state()
         except tk.TclError:
             pass
-        self._set_status("已进入按钮模式，点击小按钮可恢复完整界面")
+        self._set_status("已进入按钮模式，可点击识别或展开完整界面")
 
     def on_exit_button_mode(self):
         if not self.button_mode_active:
@@ -3516,16 +3575,13 @@ class SudokuApp:
                 if board is None:
                     if not self._is_recognition_generation_current(recognition_generation):
                         return
-                    self._log("WARNING", "未检测到有效数独网格")
+                    self._log("WARNING", "未找到有效九宫格")
                     self._recognition_started_at = None
-                    self._set_status("识别失败：未检测到完整九宫格")
+                    self._set_status("未找到九宫格，请重新识别")
                     if fallback_to_manual:
                         self.root.after(0, self._ask_manual_screenshot_after_auto_fail)
                     else:
-                        self._show_warning(
-                            "识别失败",
-                            "未检测到完整九宫格。\n\n请确认图片包含完整边框，尽量裁掉无关区域，并避免倾斜、反光或过低分辨率。",
-                        )
+                        self._show_warning("未找到九宫格", "未找到九宫格，请重新识别。")
                     return
 
                 if grid_bounds is not None:
@@ -3801,7 +3857,14 @@ class SudokuApp:
         if sys.platform != "win32":
             return None
         try:
-            return int(self.root.winfo_id())
+            hwnd = int(self.root.winfo_id())
+            try:
+                root_hwnd = ctypes.windll.user32.GetAncestor(hwnd, 2)
+                if root_hwnd:
+                    hwnd = int(root_hwnd)
+            except Exception:
+                pass
+            return hwnd
         except (tk.TclError, ValueError, TypeError):
             return None
 
@@ -3874,6 +3937,8 @@ class SudokuApp:
             resolved = self._window_info_from_handle(window_info.get("hwnd"), allow_self=False)
         if resolved is None and grid_coords:
             resolved = self._capture_window_for_grid(grid_coords, allow_self=False)
+        if resolved and resolved.get("hwnd") == self._root_window_handle():
+            resolved = None
         self.fill_target_window = resolved
         if source_label:
             if resolved:
@@ -3890,9 +3955,14 @@ class SudokuApp:
                     resolved["title"] = self.fill_target_window["title"]
                 if not resolved.get("class_name") and self.fill_target_window.get("class_name"):
                     resolved["class_name"] = self.fill_target_window["class_name"]
-                return resolved
+                if resolved.get("hwnd") != self._root_window_handle():
+                    return resolved
+            else:
+                resolved = None
         if grid_coords:
-            return self._capture_window_for_grid(grid_coords, allow_self=False)
+            resolved = self._capture_window_for_grid(grid_coords, allow_self=False)
+            if resolved and resolved.get("hwnd") != self._root_window_handle():
+                return resolved
         return None
 
     def _activate_window(self, window_info, allow_self=False):
@@ -3949,13 +4019,19 @@ class SudokuApp:
     def _restore_window(self, focus=True):
         self.root.deiconify()
         self.root.update_idletasks()
+        if self.button_mode_active:
+            try:
+                self._apply_button_mode_window_state()
+            except tk.TclError:
+                pass
+        desired_topmost = self._button_mode_topmost_enabled()
         if not focus:
-            self.root.after(100, lambda: self.root.attributes("-topmost", self.pinned))
+            self.root.after(100, lambda: self.root.attributes("-topmost", desired_topmost))
             return
         self.root.lift()
         self.root.focus_force()
         self.root.after(100, lambda: self.root.attributes("-topmost", True))
-        self.root.after(250, lambda: self.root.attributes("-topmost", self.pinned))
+        self.root.after(250, lambda: self.root.attributes("-topmost", desired_topmost))
 
     def _minimize_window(self):
         try:
@@ -4992,7 +5068,12 @@ class SudokuApp:
             mode_suffix = ""
         self._log("INFO", f"当前填充延迟: {fill_pause:.3f} 秒/步{mode_suffix}")
         self._log("INFO", f"点击聚焦等待: {click_settle_delay:.3f} 秒/格")
-        self._log("INFO", "开始填充，隐藏主窗口以避免遮挡目标界面")
+        button_mode_fill = bool(self.button_mode_active)
+        minimize_after_fill = bool(self.minimize_after_fill_enabled.get()) and not button_mode_fill
+        if button_mode_fill:
+            self._log("INFO", "按钮模式下开始填充，保留浮窗，不隐藏主窗口")
+        else:
+            self._log("INFO", "开始填充，隐藏主窗口以避免遮挡目标界面")
 
         solution = [row[:] for row in self.solution]
         grid_coords = tuple(self.grid_coords)
@@ -5030,8 +5111,11 @@ class SudokuApp:
             "mouse_start": mouse_start,
             "target_window": dict(target_window) if target_window else None,
         }
-        self._set_status("正在自动填充，窗口已隐藏，可按 Esc 取消")
-        self._hide_window_for_fill()
+        if button_mode_fill:
+            self._set_status("正在自动填充，可按 Esc 取消")
+        else:
+            self._set_status("正在自动填充，窗口已隐藏，可按 Esc 取消")
+            self._hide_window_for_fill()
         outcome = {
             "status": "ok",
             "message": None,
@@ -5141,11 +5225,13 @@ class SudokuApp:
                 self._log("INFO", "自动填充完成")
                 log_timing("本次填充完成时间", "从开始识别到填充完成")
                 self._log("INFO", "等待下一次识别开始")
-                if self.minimize_after_fill_enabled.get():
+                if minimize_after_fill:
                     self._log("INFO", "填充完成后已最小化主窗口")
                     self._set_status("填充完成，已最小化")
                     self.root.after(80, self._minimize_window)
                 else:
+                    if button_mode_fill and self.minimize_after_fill_enabled.get():
+                        self._log("INFO", "按钮模式下跳过填充完成后的最小化")
                     self._set_status("填充完成")
             elif outcome["status"] == "cancelled":
                 self._log("WARNING", f"自动填充已取消: {outcome['message']}")
@@ -5274,7 +5360,7 @@ class SudokuApp:
             screenshot,
             "自动全屏截图",
             detect_grid_bounds=True,
-            fallback_to_manual=True,
+            fallback_to_manual=False,
             fill_target_window=fill_target_window,
             recognition_generation=recognition_generation,
         )
@@ -5647,6 +5733,12 @@ class SudokuApp:
             except tk.TclError:
                 pass
             self._global_hotkey_retry_job = None
+        if self._enter_button_mode_job is not None:
+            try:
+                self.root.after_cancel(self._enter_button_mode_job)
+            except tk.TclError:
+                pass
+            self._enter_button_mode_job = None
         self._save_ui_state()
         self._release_tk_images()
         try:

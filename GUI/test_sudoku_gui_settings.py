@@ -45,6 +45,18 @@ def test_rounded_button_initializes_without_shadowing_tk_options():
         root.destroy()
 
 
+def test_app_uses_smaller_default_geometry(tmp_path):
+    root = tk.Tk()
+    root.withdraw()
+    app = SudokuApp(root)
+    app.ui_state_path = tmp_path / "state.json"
+    try:
+        root.update_idletasks()
+        assert root.geometry().startswith("1040x720")
+    finally:
+        app.on_close()
+
+
 def test_settings_button_mode_and_opacity_behaviors(tmp_path):
     root = tk.Tk()
     root.withdraw()
@@ -103,5 +115,37 @@ def test_settings_button_mode_and_opacity_behaviors(tmp_path):
         state = app._load_ui_state()
         assert state["window_opacity"] == 0.75
         assert state["button_mode_position"] == saved_position
+    finally:
+        app.on_close()
+
+
+def test_button_mode_has_quick_ocr_button(tmp_path):
+    root = tk.Tk()
+    root.withdraw()
+    app = SudokuApp(root)
+    app.ui_state_path = tmp_path / "state.json"
+    app._remember_pane_ratio = lambda: None
+    try:
+        app.on_enter_button_mode()
+        root.update_idletasks()
+
+        assert app.button_mode_active is True
+        assert app.button_mode_ocr_button is not None
+        assert app.button_mode_ocr_button.cget("text") == "识别"
+        assert "识别" in _widget_texts(app.button_mode_frame)
+        assert "展开" in _widget_texts(app.button_mode_frame)
+    finally:
+        app.on_close()
+
+
+def test_topbar_button_mode_uses_delayed_entry_command(tmp_path):
+    root = tk.Tk()
+    root.withdraw()
+    app = SudokuApp(root)
+    app.ui_state_path = tmp_path / "state.json"
+    try:
+        command = app.button_mode_toggle_button.cget("command")
+        assert getattr(command, "__self__", None) is app
+        assert getattr(command, "__func__", None) is SudokuApp.on_request_button_mode
     finally:
         app.on_close()

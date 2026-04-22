@@ -128,12 +128,12 @@ class SudokuOCR:
         groups.append((start + previous) // 2)
         return groups
 
-    def _grid_line_counts(self, horizontal, vertical, bounds):
+    def _grid_line_groups(self, horizontal, vertical, bounds):
         x, y, width, height = bounds
         horizontal_roi = horizontal[y:y + height, x:x + width]
         vertical_roi = vertical[y:y + height, x:x + width]
         if horizontal_roi.size == 0 or vertical_roi.size == 0:
-            return 0, 0
+            return [], []
 
         vertical_projection = np.count_nonzero(vertical_roi, axis=0)
         horizontal_projection = np.count_nonzero(horizontal_roi, axis=1)
@@ -141,7 +141,57 @@ class SudokuOCR:
         horizontal_threshold = max(8, int(width * 0.35))
         vertical_groups = self._projection_groups(vertical_projection, vertical_threshold)
         horizontal_groups = self._projection_groups(horizontal_projection, horizontal_threshold)
+        return vertical_groups, horizontal_groups
+
+    def _grid_line_counts(self, horizontal, vertical, bounds):
+        vertical_groups, horizontal_groups = self._grid_line_groups(horizontal, vertical, bounds)
         return len(vertical_groups), len(horizontal_groups)
+
+    def _line_groups_look_like_sudoku(self, groups, span):
+        expected_lines = BOARD_SIZE + 1
+        if len(groups) != expected_lines:
+            return False
+        spacings = np.diff(groups)
+        if len(spacings) != BOARD_SIZE:
+            return False
+        expected_step = span / BOARD_SIZE
+        deviation_limit = max(6.0, expected_step * 0.18)
+        if np.any(np.abs(spacings - expected_step) > deviation_limit):
+            return False
+        if float(np.std(spacings)) > max(3.0, expected_step * 0.08):
+            return False
+        edge_margin = max(10.0, expected_step * 0.20)
+        if groups[0] > edge_margin:
+            return False
+        if (span - 1 - groups[-1]) > edge_margin:
+            return False
+        return True
+
+    def _warped_board_has_regular_grid(self, warped):
+        gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+        blur = cv2.GaussianBlur(gray, (3, 3), 0)
+        binary = cv2.adaptiveThreshold(
+            blur,
+            255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY_INV,
+            15,
+            3,
+        )
+        edges = cv2.Canny(blur, 50, 150)
+        binary = cv2.bitwise_or(binary, edges)
+
+        kernel_length = max(15, min(gray.shape[:2]) // 24)
+        horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_length, 1))
+        vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, kernel_length))
+        horizontal = cv2.morphologyEx(binary, cv2.MORPH_OPEN, horizontal_kernel)
+        vertical = cv2.morphologyEx(binary, cv2.MORPH_OPEN, vertical_kernel)
+        vertical_groups, horizontal_groups = self._grid_line_groups(
+            horizontal,
+            vertical,
+            (0, 0, gray.shape[1], gray.shape[0]),
+        )
+        return self._line_groups_look_like_sudoku(vertical_groups, gray.shape[1]) and self._line_groups_look_like_sudoku(horizontal_groups, gray.shape[0])
 
     def _find_grid_corners_from_lines(self, gray):
         blur = cv2.GaussianBlur(gray, (3, 3), 0)
@@ -1045,12 +1095,16 @@ class SudokuOCR:
         warped = self._warp_board(image)
         if warped is None:
             return None
+        if not self._warped_board_has_regular_grid(warped):
+            return None
         return self.recognize_digits(warped)
 
     def process_with_confidence(self, image_source):
         image = self._load_image(image_source)
         warped = self._warp_board(image)
         if warped is None:
+            return None, None
+        if not self._warped_board_has_regular_grid(warped):
             return None, None
         return self.recognize_digits(warped, return_confidence=True)
 
@@ -1060,6 +1114,8 @@ class SudokuOCR:
         if result is None:
             return None, None
         warped, corners = result
+        if not self._warped_board_has_regular_grid(warped):
+            return None, None
         return self.recognize_digits(warped), self._corners_to_bounds(corners)
 
     def process_with_grid_bounds_and_confidence(self, image_source):
@@ -1068,5 +1124,7 @@ class SudokuOCR:
         if result is None:
             return None, None, None
         warped, corners = result
+        if not self._warped_board_has_regular_grid(warped):
+            return None, None, None
         board, confidence_map = self.recognize_digits(warped, return_confidence=True)
         return board, self._corners_to_bounds(corners), confidence_map

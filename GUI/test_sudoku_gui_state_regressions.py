@@ -129,6 +129,66 @@ class FakeThread:
         self.alive = True
 
 
+class FakeRestoreRoot:
+    def __init__(self):
+        self.topmost_values = []
+        self.geometry_values = []
+        self.overrideredirect_values = []
+        self.after_calls = []
+        self.deiconify_calls = 0
+        self.update_idletasks_calls = 0
+        self.lift_calls = 0
+        self.focus_force_calls = 0
+
+    def deiconify(self):
+        self.deiconify_calls += 1
+
+    def update_idletasks(self):
+        self.update_idletasks_calls += 1
+
+    def lift(self):
+        self.lift_calls += 1
+
+    def focus_force(self):
+        self.focus_force_calls += 1
+
+    def attributes(self, name, value):
+        if name == "-topmost":
+            self.topmost_values.append(value)
+
+    def overrideredirect(self, value):
+        self.overrideredirect_values.append(value)
+
+    def geometry(self, value):
+        self.geometry_values.append(value)
+
+    def after(self, delay_ms, callback):
+        self.after_calls.append(delay_ms)
+        callback()
+        return f"after-{delay_ms}"
+
+
+class FakeAfterRoot:
+    def __init__(self):
+        self.after_calls = []
+        self.cancelled = []
+
+    def after(self, delay_ms, callback):
+        self.after_calls.append((delay_ms, callback))
+        return f"after-{len(self.after_calls)}"
+
+    def after_cancel(self, job):
+        self.cancelled.append(job)
+
+
+class FlagVar:
+    def __init__(self, value):
+        self.value = value
+
+    def get(self):
+        return self.value
+
+
 def _build_stub_app():
     app = SudokuApp.__new__(SudokuApp)
     app.cells = [[Cell() for _ in range(9)] for _ in range(9)]
@@ -186,6 +246,7 @@ class SudokuGuiStateRegressionTests(unittest.TestCase):
         app._close_settings_window = lambda: None
         app._hide_candidate_popup = lambda: None
         app._build_button_mode_frame = lambda: None
+        app._apply_button_mode_window_state = lambda: None
         app._set_status = lambda message: None
 
         calls = {"ensure": 0}
@@ -219,6 +280,152 @@ class SudokuGuiStateRegressionTests(unittest.TestCase):
         SudokuApp._on_root_unmap(app)
 
         self.assertEqual(calls["ensure"], 1)
+
+    def test_root_window_handle_uses_top_level_ancestor(self):
+        app = SudokuApp.__new__(SudokuApp)
+        app.root = type("Root", (), {"winfo_id": lambda self: 101})()
+        user32 = type("User32", (), {"GetAncestor": lambda self, hwnd, flag: 202})()
+
+        with mock.patch.object(sudoku_gui.sys, "platform", "win32"), mock.patch.object(
+            sudoku_gui.ctypes,
+            "windll",
+            type("Windll", (), {"user32": user32})(),
+        ):
+            result = SudokuApp._root_window_handle(app)
+
+        self.assertEqual(result, 202)
+
+    def test_on_ocr_does_not_fallback_to_manual_selection(self):
+        app = SudokuApp.__new__(SudokuApp)
+        app._ocr_trigger_active = False
+        app._recognizing = False
+        app.grid_coords = (1, 2, 3, 4)
+        app._cancel_active_recognition = lambda *args, **kwargs: False
+        app._next_recognition_generation = lambda: 9
+        app._capture_foreground_window_info = lambda: {"hwnd": 99}
+        app._log = lambda *args, **kwargs: None
+        app._set_status = lambda message: None
+        app._is_recognition_generation_current = lambda generation: generation == 9
+        app._restore_window = lambda: None
+        captured = {}
+        app._start_image_recognition = lambda screenshot, source_label, **kwargs: captured.update(
+            {
+                "screenshot": screenshot,
+                "source_label": source_label,
+                **kwargs,
+            }
+        )
+        app.root = type(
+            "Root",
+            (),
+            {
+                "withdraw": lambda self: None,
+                "update_idletasks": lambda self: None,
+            },
+        )()
+
+        with mock.patch.object(sudoku_gui.pyautogui, "screenshot", return_value="shot"), mock.patch.object(sudoku_gui.time, "sleep", lambda _seconds: None):
+            SudokuApp.on_ocr(app)
+
+        self.assertEqual(captured["screenshot"], "shot")
+        self.assertEqual(captured["source_label"], "自动全屏截图")
+        self.assertFalse(captured["fallback_to_manual"])
+
+    def test_request_button_mode_schedules_entry_after_mouse_release(self):
+        app = SudokuApp.__new__(SudokuApp)
+        app.root = FakeAfterRoot()
+        app.button_mode_active = False
+        app._closing = False
+        app._enter_button_mode_job = None
+        calls = {"enter": 0}
+        app.on_enter_button_mode = lambda: calls.__setitem__("enter", calls["enter"] + 1)
+
+        result = SudokuApp.on_request_button_mode(app)
+
+        self.assertTrue(result)
+        self.assertEqual(calls["enter"], 0)
+        self.assertEqual(len(app.root.after_calls), 1)
+        delay_ms, callback = app.root.after_calls[0]
+        self.assertEqual(delay_ms, 80)
+        callback()
+        self.assertEqual(calls["enter"], 1)
+        self.assertIsNone(app._enter_button_mode_job)
+
+    def test_start_fill_in_button_mode_skips_hide_and_post_fill_minimize(self):
+        app = SudokuApp.__new__(SudokuApp)
+        app.solution = [[1 for _ in range(9)] for _ in range(9)]
+        app.grid_coords = (10, 20, 300, 300)
+        app.original_board = [[0 for _ in range(9)] for _ in range(9)]
+        app.recognized_board = [[0 for _ in range(9)] for _ in range(9)]
+        app._recognition_started_at = None
+        app.performance = {"last_ocr_ms": 1250}
+        app.button_mode_active = True
+        app.minimize_after_fill_enabled = FlagVar(True)
+        app.turbo_fill_enabled = FlagVar(False)
+        app.filler = type("Filler", (), {"delay": 0.03})()
+        app.root = FakeAfterRoot()
+        app.last_fill_payload = None
+        app.fill_target_window = None
+
+        hide_calls = {"count": 0}
+        statuses = []
+        logs = []
+        app._log = lambda level, message: logs.append((level, message))
+        app._set_status = lambda message: statuses.append(message)
+        app._show_warning = lambda title, message: None
+        app._show_error = lambda title, message: None
+        app._resolve_fill_target_window = lambda grid_coords: {"hwnd": 88, "title": "target"}
+        app._describe_window = lambda window: window.get("title", "")
+        app._capture_foreground_window_info = lambda allow_self=False: {"hwnd": 77, "title": "browser"}
+        app._root_window_handle = lambda: 66
+        app._hide_window_for_fill = lambda: hide_calls.__setitem__("count", hide_calls["count"] + 1)
+        app._run_hidden_fill_task = lambda task, on_done, restore_focus=True: on_done()
+        app._minimize_window = lambda: None
+
+        result = SudokuApp._start_fill(app, auto_started=False)
+
+        self.assertTrue(result)
+        self.assertEqual(hide_calls["count"], 0)
+        self.assertEqual(statuses[-1], "填充完成")
+        self.assertEqual(app.root.after_calls, [])
+        self.assertGreaterEqual(len(logs), 4)
+
+    def test_restore_window_keeps_button_mode_topmost(self):
+        app = SudokuApp.__new__(SudokuApp)
+        app.button_mode_active = True
+        app.button_mode_position = {"x": 240, "y": 180}
+        app.BUTTON_MODE_GEOMETRY = "96x42"
+        app.pinned = False
+        app.root = FakeRestoreRoot()
+
+        SudokuApp._restore_window(app)
+
+        self.assertEqual(app.root.deiconify_calls, 1)
+        self.assertEqual(app.root.lift_calls, 1)
+        self.assertEqual(app.root.focus_force_calls, 1)
+        self.assertEqual(app.root.overrideredirect_values[-1], True)
+        self.assertEqual(app.root.geometry_values[-1], "96x42+240+180")
+        self.assertEqual(app.root.topmost_values[-1], True)
+
+    def test_button_mode_release_runs_pending_action_without_exiting(self):
+        app = SudokuApp.__new__(SudokuApp)
+        calls = {"action": 0, "exit": 0, "save": 0}
+        app._button_mode_drag_moved = False
+        app._button_mode_drag_offset = (5, 6)
+        app._button_mode_drag_start = (7, 8)
+        app._button_mode_pending_action = lambda: calls.__setitem__("action", calls["action"] + 1)
+        app._schedule_ui_state_save = lambda: calls.__setitem__("save", calls["save"] + 1)
+        app.on_exit_button_mode = lambda: calls.__setitem__("exit", calls["exit"] + 1)
+
+        SudokuApp._on_button_mode_release(app)
+
+        self.assertEqual(calls["action"], 1)
+        self.assertEqual(calls["exit"], 0)
+        self.assertEqual(calls["save"], 0)
+        self.assertIsNone(app._button_mode_drag_offset)
+        self.assertIsNone(app._button_mode_drag_start)
+        self.assertFalse(app._button_mode_drag_moved)
+        self.assertIsNone(app._button_mode_pending_action)
 
     def test_on_cell_edit_invalidates_cached_solution_and_refreshes_global_highlight(self):
         app = _build_stub_app()

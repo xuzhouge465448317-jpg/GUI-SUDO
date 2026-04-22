@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+import tkinter.font as tkfont
 import traceback
 from collections import deque
 from ctypes import wintypes
@@ -31,6 +32,283 @@ except Exception:
 
 DND_FILES = getattr(_tkinterdnd2, "DND_FILES", None)
 TkinterDnD = getattr(_tkinterdnd2, "TkinterDnD", None)
+
+
+def _rounded_canvas_rect(canvas, x1, y1, x2, y2, radius, **kwargs):
+    radius = max(0, min(radius, (x2 - x1) / 2, (y2 - y1) / 2))
+    points = [
+        x1 + radius,
+        y1,
+        x2 - radius,
+        y1,
+        x2,
+        y1,
+        x2,
+        y1 + radius,
+        x2,
+        y2 - radius,
+        x2,
+        y2,
+        x2 - radius,
+        y2,
+        x1 + radius,
+        y2,
+        x1,
+        y2,
+        x1,
+        y2 - radius,
+        x1,
+        y1 + radius,
+        x1,
+        y1,
+    ]
+    return canvas.create_polygon(points, smooth=True, **kwargs)
+
+
+class RoundedSurface(tk.Frame):
+    def __init__(self, parent, bg, border, parent_bg, radius=16, padding=6, border_width=1):
+        super().__init__(parent, bg=parent_bg, bd=0, highlightthickness=0)
+        self.surface_bg = bg
+        self.surface_border = border
+        self.surface_parent_bg = parent_bg
+        self.radius = radius
+        self.padding = padding
+        self.border_width = border_width
+        self.canvas = tk.Canvas(self, bg=parent_bg, bd=0, highlightthickness=0, relief="flat")
+        self.canvas.place(x=0, y=0, relwidth=1, relheight=1)
+        self.content = tk.Frame(self, bg=bg, bd=0, highlightthickness=0)
+        self.content.pack(fill="both", expand=True, padx=padding, pady=padding)
+        self.bind("<Configure>", self._redraw, add="+")
+
+    def set_colors(self, bg=None, border=None, parent_bg=None):
+        if bg is not None:
+            self.surface_bg = bg
+            self.content.configure(bg=bg)
+        if border is not None:
+            self.surface_border = border
+        if parent_bg is not None:
+            self.surface_parent_bg = parent_bg
+            super().configure(bg=parent_bg)
+            self.canvas.configure(bg=parent_bg)
+        self._redraw()
+
+    def _redraw(self, _event=None):
+        width = max(1, self.winfo_width())
+        height = max(1, self.winfo_height())
+        inset = max(0, self.border_width // 2)
+        self.canvas.delete("surface")
+        _rounded_canvas_rect(
+            self.canvas,
+            inset,
+            inset,
+            width - inset,
+            height - inset,
+            self.radius,
+            fill=self.surface_bg,
+            outline=self.surface_border,
+            width=self.border_width,
+            tags="surface",
+        )
+        self.canvas.tag_lower("surface")
+
+
+class RoundedButton(tk.Canvas):
+    _CUSTOM_OPTIONS = {
+        "activebackground",
+        "activeforeground",
+        "anchor",
+        "background",
+        "bg",
+        "command",
+        "fg",
+        "font",
+        "foreground",
+        "highlightbackground",
+        "highlightcolor",
+        "justify",
+        "padx",
+        "pady",
+        "state",
+        "text",
+    }
+    _IGNORED_OPTIONS = {"bd", "borderwidth", "overrelief", "relief", "takefocus"}
+
+    def __init__(
+        self,
+        parent,
+        text,
+        command,
+        bg,
+        fg,
+        outline=None,
+        hover_bg=None,
+        font=None,
+        padx=8,
+        pady=5,
+        radius=8,
+    ):
+        self._button_options = {
+            "text": text,
+            "command": command,
+            "bg": bg,
+            "fg": fg,
+            "activebackground": hover_bg or bg,
+            "activeforeground": fg,
+            "highlightbackground": outline or bg,
+            "highlightcolor": outline or bg,
+            "font": font or ("Microsoft YaHei UI", 9, "bold"),
+            "padx": padx,
+            "pady": pady,
+            "anchor": "center",
+            "justify": "center",
+            "state": tk.NORMAL,
+        }
+        self.radius = radius
+        self._hover = False
+        self._pressed = False
+        width, height = self._measure()
+        parent_bg = self._parent_bg(parent)
+        super().__init__(
+            parent,
+            width=width,
+            height=height,
+            bg=parent_bg,
+            bd=0,
+            highlightthickness=0,
+            relief="flat",
+            cursor="hand2",
+        )
+        self.bind("<Configure>", self._redraw, add="+")
+        self.bind("<Enter>", self._on_enter, add="+")
+        self.bind("<Leave>", self._on_leave, add="+")
+        self.bind("<ButtonPress-1>", self._on_press, add="+")
+        self.bind("<ButtonRelease-1>", self._on_release, add="+")
+        self._redraw()
+
+    def configure(self, cnf=None, **kw):
+        if isinstance(cnf, str):
+            return self.cget(cnf)
+        options = {}
+        if cnf:
+            options.update(cnf)
+        options.update(kw)
+        redraw = False
+        resize = False
+        canvas_options = {}
+        for key, value in options.items():
+            if key in self._IGNORED_OPTIONS:
+                continue
+            normalized = self._normalize_option(key)
+            if normalized in self._CUSTOM_OPTIONS:
+                self._button_options[normalized] = value
+                redraw = True
+                if normalized in {"text", "font", "padx", "pady"}:
+                    resize = True
+                continue
+            canvas_options[key] = value
+        if canvas_options:
+            super().configure(**canvas_options)
+        if resize:
+            width, height = self._measure()
+            super().configure(width=width, height=height)
+        if redraw:
+            self._redraw()
+
+    config = configure
+
+    def cget(self, key):
+        normalized = self._normalize_option(key)
+        if normalized in self._CUSTOM_OPTIONS:
+            return self._button_options.get(normalized)
+        return super().cget(key)
+
+    def _normalize_option(self, key):
+        if key == "background":
+            return "bg"
+        if key == "foreground":
+            return "fg"
+        return key
+
+    def _parent_bg(self, parent):
+        try:
+            return parent.cget("bg")
+        except tk.TclError:
+            return "#ffffff"
+
+    def _measure(self):
+        font = tkfont.Font(font=self._button_options["font"])
+        lines = str(self._button_options["text"]).splitlines() or [""]
+        text_width = max(font.measure(line) for line in lines)
+        line_height = font.metrics("linespace")
+        width = text_width + int(self._button_options["padx"]) * 2 + 4
+        height = line_height * len(lines) + max(0, len(lines) - 1) * 3 + int(self._button_options["pady"]) * 2
+        return max(28, width), max(26, height)
+
+    def _redraw(self, _event=None):
+        width = max(1, self.winfo_width())
+        height = max(1, self.winfo_height())
+        disabled = str(self._button_options.get("state")) == tk.DISABLED
+        fill = self._button_options["activebackground"] if self._hover and not disabled else self._button_options["bg"]
+        text_color = self._button_options["activeforeground"] if self._hover and not disabled else self._button_options["fg"]
+        outline = self._button_options.get("highlightbackground") or fill
+        self.delete("button")
+        _rounded_canvas_rect(
+            self,
+            1,
+            1,
+            width - 1,
+            height - 1,
+            self.radius,
+            fill=fill,
+            outline=outline,
+            width=1,
+            tags="button",
+        )
+        anchor = self._button_options.get("anchor", "center")
+        padx = int(self._button_options["padx"])
+        if anchor in {"w", "nw", "sw"}:
+            x = padx + 4
+            text_anchor = "w"
+        elif anchor in {"e", "ne", "se"}:
+            x = width - padx - 4
+            text_anchor = "e"
+        else:
+            x = width / 2
+            text_anchor = "center"
+        self.create_text(
+            x,
+            height / 2,
+            text=self._button_options["text"],
+            fill=text_color,
+            font=self._button_options["font"],
+            justify=self._button_options.get("justify", "center"),
+            anchor=text_anchor,
+            tags="button",
+        )
+        self.configure(cursor="arrow" if disabled else "hand2")
+
+    def _on_enter(self, _event=None):
+        self._hover = True
+        self._redraw()
+
+    def _on_leave(self, _event=None):
+        self._hover = False
+        self._pressed = False
+        self._redraw()
+
+    def _on_press(self, _event=None):
+        if str(self._button_options.get("state")) == tk.DISABLED:
+            return
+        self._pressed = True
+
+    def _on_release(self, event=None):
+        if str(self._button_options.get("state")) == tk.DISABLED:
+            return
+        inside = event is None or (0 <= event.x <= self.winfo_width() and 0 <= event.y <= self.winfo_height())
+        command = self._button_options.get("command")
+        if self._pressed and inside and command is not None:
+            command()
+        self._pressed = False
 
 
 TEACHING_STRATEGIES = [
@@ -506,7 +784,10 @@ class SudokuApp:
         self._global_hotkey_thread = None
         self._global_hotkey_thread_id = None
         self._global_hotkey_id = 0x5344
+        self._global_hotkeys_registered = False
+        self._global_hotkey_retry_job = None
         self.action_buttons = []
+        self.rounded_surfaces = []
         self._closing = False
         self.history = self._load_history()
         self.performance = {
@@ -533,6 +814,7 @@ class SudokuApp:
         self._setup_windows_app_id()
         self._setup_window_icon()
         self._setup_ui()
+        self.root.bind("<Unmap>", self._on_root_unmap, add="+")
         self._setup_global_hotkeys()
         self._setup_clipboard_monitor()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -574,6 +856,62 @@ class SudokuApp:
                 self.root.iconbitmap(default=str(self.icon_ico_path))
         except Exception:
             self.icon_image = None
+
+    def _release_tk_images(self):
+        icon_image = getattr(self, "icon_image", None)
+        if icon_image is None:
+            return
+        try:
+            self.root.tk.call("image", "delete", str(icon_image))
+        except tk.TclError:
+            pass
+        self.icon_image = None
+
+    def _make_rounded_panel(
+        self,
+        parent,
+        bg_role="PANEL",
+        border_role="BORDER",
+        parent_bg_role="BG",
+        radius=16,
+        padding=6,
+        border_width=1,
+    ):
+        panel = RoundedSurface(
+            parent,
+            self._color_from_role(bg_role),
+            self._color_from_role(border_role) if border_role else self._color_from_role(bg_role),
+            self._color_from_role(parent_bg_role),
+            radius=radius,
+            padding=padding,
+            border_width=border_width,
+        )
+        self.rounded_surfaces.append(
+            {
+                "surface": panel,
+                "bg_role": bg_role,
+                "border_role": border_role,
+                "parent_bg_role": parent_bg_role,
+            }
+        )
+        return panel
+
+    def _refresh_rounded_surfaces(self):
+        active_items = []
+        for item in self.rounded_surfaces:
+            surface = item["surface"]
+            try:
+                if not surface.winfo_exists():
+                    continue
+                bg = self._color_from_role(item["bg_role"])
+                border_role = item.get("border_role")
+                border = self._color_from_role(border_role) if border_role else bg
+                parent_bg = self._color_from_role(item["parent_bg_role"])
+                surface.set_colors(bg=bg, border=border, parent_bg=parent_bg)
+                active_items.append(item)
+            except tk.TclError:
+                continue
+        self.rounded_surfaces = active_items
 
     def _setup_ui(self):
         self.root.option_add("*Font", "{Microsoft YaHei UI} 10")
@@ -694,19 +1032,14 @@ class SudokuApp:
         )
         self.button_mode_toggle_button.pack(side="right", padx=(0, 8))
 
-        self.settings_button = tk.Button(
+        self.settings_button = self._make_action_button(
             self.topbar_tools,
-            text="设置",
-            command=self.on_open_settings,
-            bg=self.PANEL,
-            fg=self.TEXT,
-            activebackground=self.SOFT_BLUE,
-            activeforeground=self.TEXT,
-            relief="raised",
-            bd=1,
-            highlightthickness=1,
-            highlightbackground=self.BORDER,
-            cursor="hand2",
+            "设置",
+            self.on_open_settings,
+            self.PANEL,
+            self.TEXT,
+            outline=self.BORDER,
+            hover_bg=self.SOFT_BLUE,
             font=("Microsoft YaHei UI", 9, "bold"),
             padx=10,
             pady=4,
@@ -721,25 +1054,16 @@ class SudokuApp:
             return
         pin_wrap = tk.Frame(self.topbar_tools, bg=self.BG)
         pin_wrap.pack(side="right", anchor="n", padx=(0, 8))
-        self.pin_button = tk.Button(
+        self.pin_button = self._make_action_button(
             pin_wrap,
-            text="置顶",
-            command=self.on_toggle_pin,
-            bg=self.PANEL,
-            fg=self.TEXT,
-            activebackground=self.SOFT_BLUE,
-            activeforeground=self.TEXT,
-            relief="raised",
-            overrelief="raised",
-            bd=1,
-            highlightthickness=1,
-            highlightbackground=self.BORDER,
-            highlightcolor=self.PRIMARY,
-            width=6,
+            "置顶",
+            self.on_toggle_pin,
+            self.PANEL,
+            self.TEXT,
+            outline=self.BORDER,
+            hover_bg=self.SOFT_BLUE,
             padx=8,
             pady=4,
-            cursor="hand2",
-            takefocus=True,
             font=("Microsoft YaHei UI", 9, "bold"),
         )
         self.pin_button.pack(side="right")
@@ -822,6 +1146,7 @@ class SudokuApp:
         self._close_settings_window()
         self._hide_candidate_popup()
         self._build_button_mode_frame()
+        self._ensure_global_hotkeys()
 
         self.button_mode_active = True
         self._normal_window_geometry = self.root.geometry()
@@ -950,30 +1275,46 @@ class SudokuApp:
         return board_panel
 
     def _build_board(self, parent):
-        board_panel = tk.Frame(parent, bg=self.PANEL, highlightthickness=1, highlightbackground=self.BORDER)
+        board_panel = self._make_rounded_panel(parent, radius=18, padding=5)
         self.board_panel = board_panel
+        board_body = board_panel.content
 
-        info = tk.Frame(board_panel, bg=self.PANEL)
+        info = tk.Frame(board_body, bg=self.PANEL)
         self.board_info = info
         info.pack(fill="x", padx=14, pady=(12, 3))
         tk.Label(info, text="盘面", bg=self.PANEL, fg=self.TEXT, font=("Microsoft YaHei UI", 12, "bold")).pack(anchor="w")
 
-        holder = tk.Frame(board_panel, bg=self.PANEL, padx=12, pady=10)
+        holder = tk.Frame(board_body, bg=self.PANEL, padx=12, pady=10)
         self.board_holder = holder
         holder.pack(fill="both", expand=True)
         holder.pack_propagate(False)
         holder.bind("<Configure>", self._schedule_board_resize, add="+")
 
-        stage = tk.Frame(holder, bg=self.BOARD_STAGE, highlightthickness=1, highlightbackground=self.BOARD_RING)
+        stage = self._make_rounded_panel(
+            holder,
+            bg_role="BOARD_STAGE",
+            border_role="BOARD_RING",
+            parent_bg_role="PANEL",
+            radius=20,
+            padding=5,
+        )
         self.board_stage = stage
         stage.place(relx=0.5, rely=0.5, anchor="center")
         stage.pack_propagate(False)
 
-        shadow = tk.Frame(stage, bg=self.BOARD_SHADOW)
+        shadow = self._make_rounded_panel(
+            stage.content,
+            bg_role="BOARD_SHADOW",
+            border_role=None,
+            parent_bg_role="BOARD_STAGE",
+            radius=16,
+            padding=4,
+            border_width=0,
+        )
         self.board_shadow = shadow
         shadow.place(relx=0.5, rely=0.5, anchor="center")
 
-        self.grid_frame = tk.Frame(shadow, bg=self.BOX_RING)
+        self.grid_frame = tk.Frame(shadow.content, bg=self.BOX_RING)
         self.grid_frame.place(relx=0.5, rely=0.5, anchor="center")
         self.cells = [[None for _ in range(9)] for _ in range(9)]
         self.cell_frames = [[None for _ in range(9)] for _ in range(9)]
@@ -1535,8 +1876,9 @@ class SudokuApp:
         side = tk.Frame(parent, bg=self.BG)
         side.pack(fill="x")
 
-        actions = tk.Frame(side, bg=self.PANEL, highlightthickness=1, highlightbackground=self.BORDER)
-        actions.pack(fill="x")
+        actions_panel = self._make_rounded_panel(side, radius=16, padding=5)
+        actions_panel.pack(fill="x")
+        actions = actions_panel.content
 
         head = tk.Frame(actions, bg=self.PANEL)
         head.pack(fill="x", padx=14, pady=(12, 8))
@@ -1635,11 +1977,12 @@ class SudokuApp:
         self.generate_menu.pack(side="right")
 
     def _build_teaching_panel(self, parent):
-        panel = tk.Frame(parent, bg=self.PANEL, highlightthickness=1, highlightbackground=self.BORDER)
+        panel = self._make_rounded_panel(parent, radius=18, padding=5)
         self.teaching_panel = panel
         panel.bind("<Configure>", self._update_teaching_wraplength, add="+")
+        panel_body = panel.content
 
-        head = tk.Frame(panel, bg=self.PANEL)
+        head = tk.Frame(panel_body, bg=self.PANEL)
         head.pack(fill="x", padx=14, pady=(12, 8))
         tk.Label(head, text="教学模式", bg=self.PANEL, fg=self.TEXT, font=("Microsoft YaHei UI", 12, "bold")).pack(side="left")
         self.teaching_start_button = self._make_action_button(
@@ -1669,7 +2012,7 @@ class SudokuApp:
         )
         self.teaching_header_exit_button.pack(side="right", padx=(0, 8))
 
-        body = tk.Frame(panel, bg=self.PANEL)
+        body = tk.Frame(panel_body, bg=self.PANEL)
         body.pack(fill="both", expand=True, padx=14, pady=(0, 12))
 
         self.teaching_step_label = tk.Label(
@@ -1836,11 +2179,12 @@ class SudokuApp:
                     pass
 
     def _build_log_panel(self, parent):
-        panel = tk.Frame(parent, bg=self.PANEL, highlightthickness=1, highlightbackground=self.BORDER)
+        panel = self._make_rounded_panel(parent, radius=16, padding=5)
         panel.pack(fill="both", expand=True, pady=(10, 0))
         self.log_panel = panel
+        panel_body = panel.content
 
-        head = tk.Frame(panel, bg=self.PANEL)
+        head = tk.Frame(panel_body, bg=self.PANEL)
         head.pack(fill="x", padx=12, pady=(10, 6))
         tk.Label(head, text="日志", bg=self.PANEL, fg=self.TEXT, font=("Microsoft YaHei UI", 12, "bold")).pack(side="left")
         self.log_toggle_button = self._make_action_button(
@@ -1869,7 +2213,7 @@ class SudokuApp:
             pady=3,
         ).pack(side="right", padx=(0, 6))
 
-        body = tk.Frame(panel, bg=self.PANEL)
+        body = tk.Frame(panel_body, bg=self.PANEL)
         body.pack(fill="both", expand=True, padx=12, pady=(0, 10))
         self.log_body = body
 
@@ -1992,24 +2336,17 @@ class SudokuApp:
         self._run_on_ui_thread(apply)
 
     def _make_action_button(self, parent, text, command, bg, fg, outline=None, hover_bg=None, font=None, padx=8, pady=5):
-        button = tk.Button(
+        button = RoundedButton(
             parent,
-            text=text,
-            command=command,
-            bg=bg,
-            fg=fg,
-            activebackground=hover_bg or self._hover_color(bg),
-            activeforeground=fg,
-            relief="flat",
-            bd=0,
-            highlightthickness=1 if outline else 0,
-            highlightbackground=outline or bg,
-            highlightcolor=outline or bg,
+            text,
+            command,
+            bg,
+            fg,
+            outline=outline,
+            hover_bg=hover_bg or self._hover_color(bg),
+            font=font or ("Microsoft YaHei UI", 9, "bold"),
             padx=padx,
             pady=pady,
-            cursor="hand2",
-            justify="center",
-            font=font or ("Microsoft YaHei UI", 9, "bold"),
         )
         self.action_buttons.append(
             {
@@ -2504,6 +2841,7 @@ class SudokuApp:
         color_map = self._build_theme_color_map(old_palette)
         self.root.configure(bg=self.BG)
         self._recolor_widget_tree(self.root, color_map)
+        self._refresh_rounded_surfaces()
         self._refresh_action_buttons()
         self._refresh_pin_visual()
         self._refresh_settings_window()
@@ -2707,10 +3045,50 @@ class SudokuApp:
         return "break" if result is not False else None
 
     def _setup_global_hotkeys(self):
+        self._ensure_global_hotkeys()
+
+    def _ensure_global_hotkeys(self):
         if sys.platform != "win32":
-            return
+            return False
+        thread = getattr(self, "_global_hotkey_thread", None)
+        if thread is not None and thread.is_alive():
+            return True
+        retry_job = getattr(self, "_global_hotkey_retry_job", None)
+        if retry_job is not None:
+            try:
+                self.root.after_cancel(retry_job)
+            except (tk.TclError, RuntimeError, AttributeError):
+                pass
+            self._global_hotkey_retry_job = None
+        self._global_hotkey_thread_id = None
+        self._global_hotkeys_registered = False
         self._global_hotkey_thread = threading.Thread(target=self._global_hotkey_loop, daemon=True)
         self._global_hotkey_thread.start()
+        return True
+
+    def _schedule_global_hotkey_retry(self, delay_ms=1500):
+        if sys.platform != "win32" or self._closing:
+            return
+        if self._global_hotkey_retry_job is not None:
+            return
+
+        def retry():
+            self._global_hotkey_retry_job = None
+            self._ensure_global_hotkeys()
+
+        try:
+            self._global_hotkey_retry_job = self.root.after(delay_ms, retry)
+        except (tk.TclError, RuntimeError):
+            self._global_hotkey_retry_job = None
+
+    def _on_root_unmap(self, _event=None):
+        if sys.platform != "win32":
+            return
+        try:
+            if self.root.state() in {"iconic", "withdrawn"}:
+                self._ensure_global_hotkeys()
+        except tk.TclError:
+            return
 
     def _global_hotkey_loop(self):
         try:
@@ -2723,8 +3101,11 @@ class SudokuApp:
             vk_f2 = 0x71
 
             self._global_hotkey_thread_id = kernel32.GetCurrentThreadId()
+            self._global_hotkeys_registered = False
             if not user32.RegisterHotKey(None, self._global_hotkey_id, 0, vk_f2):
+                self._run_on_ui_thread(lambda: self._schedule_global_hotkey_retry())
                 return
+            self._global_hotkeys_registered = True
 
             msg = wintypes.MSG()
             try:
@@ -2734,9 +3115,14 @@ class SudokuApp:
                     user32.TranslateMessage(ctypes.byref(msg))
                     user32.DispatchMessageW(ctypes.byref(msg))
             finally:
-                user32.UnregisterHotKey(None, self._global_hotkey_id)
+                if self._global_hotkeys_registered:
+                    user32.UnregisterHotKey(None, self._global_hotkey_id)
         except Exception:
+            self._run_on_ui_thread(lambda: self._schedule_global_hotkey_retry())
             return
+        finally:
+            self._global_hotkeys_registered = False
+            self._global_hotkey_thread_id = None
 
     def _teardown_global_hotkeys(self):
         if sys.platform != "win32" or self._global_hotkey_thread_id is None:
@@ -2970,6 +3356,9 @@ class SudokuApp:
         if not puzzle:
             return
         self._cancel_solution_animation()
+        self.grid_coords = None
+        self._clear_fill_target_window()
+        self.last_fill_payload = None
         self.recognized_board = [row[:] for row in puzzle]
         self.original_board = [row[:] for row in puzzle]
         self.solution = [row[:] for row in solution] if solution else None
@@ -3570,6 +3959,7 @@ class SudokuApp:
 
     def _minimize_window(self):
         try:
+            self._ensure_global_hotkeys()
             self.root.iconify()
         except tk.TclError:
             return
@@ -3586,6 +3976,18 @@ class SudokuApp:
                 cell.insert(0, normalized)
             self.updating_ui = False
         return int(normalized) if normalized else 0
+
+    def _committed_cell_value(self, row, col):
+        if self.cell_sources[row][col] == "solution" and self.solution is not None:
+            return self.solution[row][col]
+        board = getattr(self, "original_board", None)
+        if board is not None:
+            return board[row][col]
+        return 0
+
+    def _invalidate_cached_solution(self):
+        self.solution = None
+        self.last_fill_payload = None
 
     def _refresh_cell_style(self, row, col):
         cell = self.cells[row][col]
@@ -3685,8 +4087,11 @@ class SudokuApp:
         if self.teaching_active:
             self._exit_teaching_mode(silent=True)
         self.low_confidence_cells.discard((row, col))
+        previous_value = self._committed_cell_value(row, col)
         self.selected_cell = (row, col)
         value = self._normalize_cell_text(row, col)
+        self.selected_digit = value or None
+        self.selected_candidate_cell = (row, col) if value == 0 else None
         recognized = self.recognized_board[row][col] if self.recognized_board else 0
         if value == 0:
             self.cell_sources[row][col] = "empty"
@@ -3694,7 +4099,9 @@ class SudokuApp:
             self.cell_sources[row][col] = "ocr"
         else:
             self.cell_sources[row][col] = "manual"
-        self._refresh_cell_style(row, col)
+        if value != previous_value:
+            self._invalidate_cached_solution()
+        self._refresh_all_cell_styles()
         self._update_metrics()
 
     def _on_cell_click(self, row, col, _event=None):
@@ -3801,6 +4208,7 @@ class SudokuApp:
         }
 
     def _apply_cell_value(self, row, col, value):
+        previous_value = self._committed_cell_value(row, col)
         self.updating_ui = True
         self.cells[row][col].delete(0, tk.END)
         if value:
@@ -3816,9 +4224,11 @@ class SudokuApp:
         else:
             self.cell_sources[row][col] = "manual"
 
+        if value != previous_value:
+            self._invalidate_cached_solution()
         self.selected_cell = (row, col)
         self.selected_digit = value or None
-        self.selected_candidate_cell = None
+        self.selected_candidate_cell = (row, col) if value == 0 else None
         self._refresh_all_cell_styles()
         self._update_metrics()
 
@@ -3981,8 +4391,19 @@ class SudokuApp:
             font=("Microsoft YaHei UI", 9, "bold"),
         )
         label.pack(padx=1, pady=1)
+        popup.update_idletasks()
+        popup_w = max(1, popup.winfo_reqwidth())
+        popup_h = max(1, popup.winfo_reqheight())
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
         x = cell.winfo_rootx() + cell.winfo_width() + 10
         y = max(0, cell.winfo_rooty() - 6)
+        if x + popup_w > screen_w - 8:
+            x = max(8, cell.winfo_rootx() - popup_w - 10)
+        if y + popup_h > screen_h - 8:
+            y = max(8, screen_h - popup_h - 8)
+        if y < 8:
+            y = 8
         popup.geometry(f"+{x}+{y}")
         self.hint_popup = popup
 
@@ -5066,6 +5487,7 @@ class SudokuApp:
         col = hint["col"]
         value = hint["value"]
         reason = hint["reason"]
+        self._invalidate_cached_solution()
         self.updating_ui = True
         self.cells[row][col].delete(0, tk.END)
         self.cells[row][col].insert(0, str(value))
@@ -5195,6 +5617,18 @@ class SudokuApp:
         self._cancel_solution_animation()
         self._clear_hint_feedback(refresh=False)
         self._hide_candidate_popup()
+        if self._board_resize_job is not None:
+            try:
+                self.root.after_cancel(self._board_resize_job)
+            except tk.TclError:
+                pass
+            self._board_resize_job = None
+        if self._log_stage_reset_job is not None:
+            try:
+                self.root.after_cancel(self._log_stage_reset_job)
+            except tk.TclError:
+                pass
+            self._log_stage_reset_job = None
         if self._clipboard_poll_job is not None:
             self.root.after_cancel(self._clipboard_poll_job)
             self._clipboard_poll_job = None
@@ -5207,7 +5641,14 @@ class SudokuApp:
         if self._log_flush_job is not None:
             self.root.after_cancel(self._log_flush_job)
             self._log_flush_job = None
+        if self._global_hotkey_retry_job is not None:
+            try:
+                self.root.after_cancel(self._global_hotkey_retry_job)
+            except tk.TclError:
+                pass
+            self._global_hotkey_retry_job = None
         self._save_ui_state()
+        self._release_tk_images()
         try:
             self.root.destroy()
         except tk.TclError:

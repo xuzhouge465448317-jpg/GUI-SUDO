@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from sudoku_gui import SudokuApp
+from sudoku_gui import RoundedButton, SudokuApp
 
 
 class MouseEvent:
@@ -25,6 +25,24 @@ def _widget_texts(widget):
     for child in widget.winfo_children():
         texts.extend(_widget_texts(child))
     return texts
+
+
+def test_rounded_button_initializes_without_shadowing_tk_options():
+    root = tk.Tk()
+    root.withdraw()
+    frame = tk.Frame(root, bg="#ffffff")
+    frame.pack()
+    try:
+        button = RoundedButton(
+            frame,
+            text="测试",
+            command=lambda: None,
+            bg="#336699",
+            fg="#ffffff",
+        )
+        assert isinstance(button, tk.Canvas)
+    finally:
+        root.destroy()
 
 
 def test_settings_button_mode_and_opacity_behaviors(tmp_path):
